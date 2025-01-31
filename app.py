@@ -75,9 +75,10 @@ def load_phones():
             return []
 
 def save_phones(phones):
-    with LOCK:
+    with LOCK:  # Protegge l'accesso al file
         with open(PHONES_FILE, 'w', encoding='utf-8') as f:
             json.dump(phones, f, indent=2, ensure_ascii=False)
+
 
 def reset_daily_counters_if_needed(phone_entry):
     today_str = datetime.date.today().isoformat()
@@ -100,6 +101,7 @@ def save_add_session():
     with LOCK:
         with open(LOG_STATUS_FILE, 'w', encoding='utf-8') as f:
             json.dump(ADD_SESSION, f, indent=2, ensure_ascii=False)
+
 
 def create_telegram_client(phone_entry):
     session_file = os.path.join(SESSIONS_FOLDER, f"{phone_entry['phone']}.session")
