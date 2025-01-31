@@ -852,4 +852,4 @@ def upload_excel():
 
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000, threaded=False, use_reloader=False)
+    app.run(debug=True, port=5050, threaded=False, use_reloader=False)
