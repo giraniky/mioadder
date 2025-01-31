@@ -3,6 +3,7 @@ import json
 import threading
 import time
 import datetime
+import asyncio
 from flask import Flask, render_template, request, jsonify
 from werkzeug.utils import secure_filename
 
@@ -470,8 +471,10 @@ def add_users_to_group_thread(group_username, users_list):
     ADD_SESSION['total_added'] = 0
     ADD_SESSION['log'] = []
     ADD_SESSION['start_time'] = time.time()
+
     if 'last_user_index' not in ADD_SESSION:
         ADD_SESSION['last_user_index'] = 0
+
     ADD_SESSION['paused_due_to_limit'] = False
     ADD_SESSION['paused_until'] = None
     save_add_session()
@@ -491,6 +494,26 @@ def add_users_to_group_thread(group_username, users_list):
         'user_status_empty': ADD_SESSION.get('user_status_empty', False)
     }
 
+    # Creiamo un nuovo event loop per questo thread
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        loop.run_until_complete(run_add_users(group_username, users_list, skip_config))
+    except Exception as e:
+        log(f"Errore nell'operazione di aggiunta: {e}")
+    finally:
+        loop.close()
+        ADD_SESSION['running'] = False
+        log("Operazione di aggiunta terminata.")
+        save_add_session()
+
+
+async def run_add_users(group_username, users_list, skip_config):
+    """ Funzione asincrona che esegue la logica principale di aggiunta utenti """
+    global ADD_SESSION
+    log(f"Inizio operazione per aggiungere utenti al gruppo: {group_username}")
+
     # Carichiamo i phone
     phones = load_phones()
     phone_clients = {}
@@ -501,274 +524,264 @@ def add_users_to_group_thread(group_username, users_list):
             save_add_session()
         print(msg)
 
-    try:
-        # Connessione
-        for p in phones:
-            reset_daily_counters_if_needed(p)
-            session_path = os.path.join(SESSIONS_FOLDER, f"{p['phone']}.session")
-            if os.path.isfile(session_path) and not p['paused']:
-                try:
-                    c = create_telegram_client(p)
-                    c.connect()
-                    phone_clients[p['phone']] = c
-                except Exception as e:
-                    log(f"[{p['phone']}] Errore di connessione: {e}")
-
-        if not phone_clients:
-            log("Nessun numero disponibile con sessione valida. Interruzione.")
-            ADD_SESSION['running'] = False
-            save_add_session()
-            return
-
-        # Recupero entità gruppo
-        group_entities = {}
-        for phone, client in list(phone_clients.items()):
+    # Connessione
+    for p in phones:
+        reset_daily_counters_if_needed(p)
+        session_path = os.path.join(SESSIONS_FOLDER, f"{p['phone']}.session")
+        if os.path.isfile(session_path) and not p['paused']:
             try:
-                grp_ent = client.get_entity(group_username)
-                if isinstance(grp_ent, (tl.types.Channel, tl.types.Chat)):
-                    group_entities[phone] = grp_ent
-                    log(f"[{phone}] Gruppo '{group_username}' risolto correttamente.")
-                else:
-                    log(f"[{phone}] Gruppo '{group_username}' non è un canale/supergruppo. Pausa del numero.")
-                    set_phone_pause(phone, paused=True)
-            except errors.UsernameNotOccupiedError:
-                log(f"[{phone}] Gruppo '{group_username}' non esiste. Pausa del numero.")
-                set_phone_pause(phone, paused=True)
-            except errors.ChannelPrivateError:
-                log(f"[{phone}] Gruppo '{group_username}' è privato e non accessibile. Pausa del numero.")
-                set_phone_pause(phone, paused=True)
+                c = create_telegram_client(p)
+                await c.connect()
+                phone_clients[p['phone']] = c
             except Exception as e:
-                log(f"[{phone}] Impossibile recuperare il gruppo '{group_username}': {e}. Pausa del numero.")
-                set_phone_pause(phone, paused=True)
+                log(f"[{p['phone']}] Errore di connessione: {e}")
 
-        # Rimuoviamo i client che non possono gestire il gruppo
-        for phone in list(phone_clients.keys()):
-            if phone not in group_entities:
-                phone_clients[phone].disconnect()
+    if not phone_clients:
+        log("Nessun numero disponibile con sessione valida. Interruzione.")
+        ADD_SESSION['running'] = False
+        save_add_session()
+        return
+
+    # Recupero entità gruppo
+    group_entities = {}
+    for phone, client in list(phone_clients.items()):
+        try:
+            grp_ent = await client.get_entity(group_username)
+            if isinstance(grp_ent, (tl.types.Channel, tl.types.Chat)):
+                group_entities[phone] = grp_ent
+                log(f"[{phone}] Gruppo '{group_username}' risolto correttamente.")
+            else:
+                log(f"[{phone}] Gruppo '{group_username}' non è un canale/supergruppo. Pausa del numero.")
+                set_phone_pause(phone, paused=True)
+        except errors.UsernameNotOccupiedError:
+            log(f"[{phone}] Gruppo '{group_username}' non esiste. Pausa del numero.")
+            set_phone_pause(phone, paused=True)
+        except errors.ChannelPrivateError:
+            log(f"[{phone}] Gruppo '{group_username}' è privato e non accessibile. Pausa del numero.")
+            set_phone_pause(phone, paused=True)
+        except Exception as e:
+            log(f"[{phone}] Impossibile recuperare il gruppo '{group_username}': {e}. Pausa del numero.")
+            set_phone_pause(phone, paused=True)
+
+    # Rimuoviamo i client che non possono gestire il gruppo
+    for phone in list(phone_clients.keys()):
+        if phone not in group_entities:
+            await phone_clients[phone].disconnect()
+            del phone_clients[phone]
+
+    if not group_entities:
+        log("Nessun client può accedere al gruppo. Interruzione.")
+        ADD_SESSION['running'] = False
+        for c in phone_clients.values():
+            await c.disconnect()
+        save_add_session()
+        return
+
+    # Aggiunta di un controllo: assicurarsi che ogni phone sia già nel gruppo
+    for phone, client in phone_clients.items():
+        try:
+            me = await client.get_me()
+            await client(GetParticipantRequest(group_entities[phone], me))
+            log(f"[{phone}] Il numero è già nel gruppo.")
+        except rpcerrorlist.UserNotParticipantError:
+            try:
+                await client(JoinChannelRequest(group_entities[phone]))
+                # Verifica se è riuscito ad unirsi
+                await client(GetParticipantRequest(group_entities[phone], me))
+                log(f"[{phone}] Unito al gruppo con successo.")
+            except Exception as e:
+                log(f"[{phone}] Errore unendosi al gruppo: {e}. Pausa del numero.")
+                set_phone_pause(phone, paused=True)
+        except Exception as e:
+            log(f"[{phone}] Errore controllando la partecipazione al gruppo: {e}. Pausa del numero.")
+            set_phone_pause(phone, paused=True)
+
+    # Rimuoviamo i client che non sono riusciti ad unirsi al gruppo
+    for phone in list(phone_clients.keys()):
+        phones_updated = load_phones()
+        for p in phones_updated:
+            if p['phone'] == phone and p['paused']:
+                await phone_clients[phone].disconnect()
                 del phone_clients[phone]
-
-        if not group_entities:
-            log("Nessun client può accedere al gruppo. Interruzione.")
-            ADD_SESSION['running'] = False
-            for c in phone_clients.values():
-                c.disconnect()
-            save_add_session()
-            return
-
-        # Aggiunta di un controllo: assicurarsi che ogni phone sia già nel gruppo
-        for phone, client in phone_clients.items():
-            try:
-                me = client.get_me()
-                client(GetParticipantRequest(group_entities[phone], me))
-                log(f"[{phone}] Il numero è già nel gruppo.")
-            except rpcerrorlist.UserNotParticipantError:
-                try:
-                    client(JoinChannelRequest(group_entities[phone]))
-                    # Verifica se è riuscito ad unirsi
-                    client(GetParticipantRequest(group_entities[phone], me))
-                    log(f"[{phone}] Unito al gruppo con successo.")
-                except Exception as e:
-                    log(f"[{phone}] Errore unendosi al gruppo: {e}. Pausa del numero.")
-                    set_phone_pause(phone, paused=True)
-            except Exception as e:
-                log(f"[{phone}] Errore controllando la partecipazione al gruppo: {e}. Pausa del numero.")
-                set_phone_pause(phone, paused=True)
-
-        # Rimuoviamo i client che non sono riusciti ad unirsi al gruppo
-        for phone in list(phone_clients.keys()):
-            phones_updated = load_phones()
-            for p in phones_updated:
-                if p['phone'] == phone and p['paused']:
-                    phone_clients[phone].disconnect()
-                    del phone_clients[phone]
-                    break
-
-        if not phone_clients:
-            log("Nessun client disponibile dopo il controllo di partecipazione al gruppo. Interruzione.")
-            ADD_SESSION['running'] = False
-            save_add_session()
-            return
-
-        phone_list = sorted(list(phone_clients.keys()))
-        phone_index = 0
-
-        i = ADD_SESSION.get('last_user_index', 0)
-        while i < len(users_list):
-            if not ADD_SESSION.get('running', False):
-                break
-            username = users_list[i].strip()
-            if not username:
-                i += 1
-                ADD_SESSION['last_user_index'] = i
-                save_add_session()
-                continue
-
-            # Cerca un phone disponibile
-            attempts = 0
-            selected_phone = None
-            while attempts < len(phone_list):
-                cur_phone = phone_list[phone_index]
-                phone_index = (phone_index + 1) % len(phone_list)
-                attempts += 1
-
-                if cur_phone not in phone_clients:
-                    continue
-
-                current_phones = load_phones()
-                p_entry = None
-                for px in current_phones:
-                    if px['phone'] == cur_phone:
-                        p_entry = px
-                        reset_daily_counters_if_needed(px)
-                        break
-
-                if not p_entry:
-                    continue
-                if p_entry['paused']:
-                    continue
-                if p_entry['added_today'] >= 45:
-                    continue
-
-                flood_time = 0
-                if p_entry['paused_until']:
-                    paused_until_dt = datetime.datetime.fromisoformat(p_entry['paused_until'])
-                    delta = (paused_until_dt - datetime.datetime.now()).total_seconds()
-                    flood_time = max(int(delta), 0)
-                if flood_time > 0:
-                    continue
-
-                selected_phone = cur_phone
                 break
 
-            if not selected_phone:
-                suspend_until_enough_phones(min_phones_available, load_phones(), username)
-                if not ADD_SESSION.get('running', False):
-                    break
-                continue
+    if not phone_clients:
+        log("Nessun client disponibile dopo il controllo di partecipazione al gruppo. Interruzione.")
+        ADD_SESSION['running'] = False
+        save_add_session()
+        return
 
-            client = phone_clients[selected_phone]
-            group_entity = group_entities[selected_phone]
+    phone_list = sorted(list(phone_clients.keys()))
+    phone_index = 0
 
-            # Risolviamo l'utente
-            try:
-                user_entity = client.get_entity(username)
-            except errors.UsernameNotOccupiedError:
-                log(f"[{selected_phone}] {username}: l'username non esiste. Skipping.")
-                i += 1
-                ADD_SESSION['last_user_index'] = i
-                save_add_session()
-                continue
-            except Exception as ex:
-                err_msg = str(ex)
-                log(f"[{selected_phone}] Errore risoluzione {username}: {err_msg}. Skipping.")
-                if 'A wait of' in err_msg and 'seconds is required' in err_msg:
-                    try:
-                        parts = err_msg.split('A wait of')[1].split('seconds is required')[0].strip()
-                        wait_seconds = int(parts)
-                        set_phone_pause(selected_phone, paused=True, seconds=wait_seconds)
-                        log(f"[{selected_phone}] Pausa per {wait_seconds} secondi (FloodWait).")
-                    except:
-                        pass
-                i += 1
-                ADD_SESSION['last_user_index'] = i
-                save_add_session()
-                continue
-
-            # --- NUOVO CONTROLLO: skip in base a last_seen ---
-            if should_skip_user_by_last_seen(user_entity, skip_config):
-                log(f"[{selected_phone}] {username}: skip per impostazioni ultimo accesso (status={user_entity.status}).")
-                i += 1
-                ADD_SESSION['last_user_index'] = i
-                save_add_session()
-                continue
-
-            # Verifichiamo se è già nel gruppo
-            try:
-                client(GetParticipantRequest(group_entity, user_entity))
-                log(f"[{selected_phone}] {username}: già nel gruppo. Skipping.")
-                i += 1
-                ADD_SESSION['last_user_index'] = i
-                save_add_session()
-                continue
-            except rpcerrorlist.UserNotParticipantError:
-                pass
-            except Exception as e:
-                log(f"[{selected_phone}] Errore controllando partecipazione di {username}: {e}. Skipping.")
-                i += 1
-                ADD_SESSION['last_user_index'] = i
-                save_add_session()
-                continue
-
-            # Tentiamo l'aggiunta
-            try:
-                client(InviteToChannelRequest(group_entity, [user_entity]))
-                # Se non c'è eccezione, consideriamo aggiunto
-                update_phone_stats(selected_phone, added=1, total=1)
-                ADD_SESSION['total_added'] += 1
-                log(f"[{selected_phone}] Aggiunto con successo -> {username}")
-
-                # Verifica se risulta nel gruppo
-                try:
-                    client(GetParticipantRequest(group_entity, user_entity))
-                    log(f"[{selected_phone}] {username}: inserito e confermato nel gruppo.")
-                except:
-                    # Non risulta dopo l'aggiunta
-                    log(f"[{selected_phone}] ERRORE: {username} non risulta nel gruppo dopo l'aggiunta.")
-                    update_phone_stats(selected_phone, non_result_err_inc=1)
-                    # Carichiamo phone di nuovo per verificare contatore
-                    p_after = load_phones()
-                    for xx in p_after:
-                        if xx['phone'] == selected_phone:
-                            if xx['non_result_errors'] >= max_non_result_errors:
-                                set_phone_pause(selected_phone, paused=True, days=days_pause_non_result_errors)
-                                xx['non_result_errors'] = 0
-                                save_phones(p_after)
-                                log(f"[{selected_phone}] Superata soglia errori: pausa di {days_pause_non_result_errors} giorni.")
-
-                time.sleep(sleep_seconds)
-
-            except errors.FloodWaitError as e:
-                wait_seconds = e.seconds
-                log(f"[{selected_phone}] FloodWaitError. Pausa {wait_seconds}s.")
-                set_phone_pause(selected_phone, paused=True, seconds=wait_seconds)
-                time.sleep(wait_seconds)
-            except errors.PeerFloodError:
-                log(f"[{selected_phone}] PeerFloodError: spam rilevato. Pausa 2 min.")
-                set_phone_pause(selected_phone, paused=True, seconds=120)
-            except errors.UserPrivacyRestrictedError:
-                log(f"[{selected_phone}] {username}: Restrizione privacy. Non è possibile invitarlo direttamente, si può invitare tramite link.")
-            except errors.UserNotMutualContactError:
-                log(f"[{selected_phone}] {username}: non è contatto reciproco. Skipping.")
-            except Exception as ex:
-                err_msg = str(ex)
-                log(f"[{selected_phone}] Errore sconosciuto con {username}: {err_msg}. Skipping.")
-                if 'A wait of' in err_msg and 'seconds is required' in err_msg:
-                    try:
-                        parts = err_msg.split('A wait of')[1].split('seconds is required')[0].strip()
-                        wait_seconds = int(parts)
-                        set_phone_pause(selected_phone, paused=True, seconds=wait_seconds)
-                        log(f"[{selected_phone}] Messo in pausa per {wait_seconds} secondi (FloodWait).")
-                    except:
-                        pass
-
+    i = ADD_SESSION.get('last_user_index', 0)
+    while i < len(users_list):
+        if not ADD_SESSION.get('running', False):
+            break
+        username = users_list[i].strip()
+        if not username:
             i += 1
             ADD_SESSION['last_user_index'] = i
             save_add_session()
+            continue
 
-    except Exception as e:
-        log(f"Errore nell'operazione di aggiunta: {e}")
-    finally:
-        # Assicurarsi che tutti i client siano disconnessi
-        for c in phone_clients.values():
+        # Cerca un phone disponibile
+        attempts = 0
+        selected_phone = None
+        while attempts < len(phone_list):
+            cur_phone = phone_list[phone_index]
+            phone_index = (phone_index + 1) % len(phone_list)
+            attempts += 1
+
+            if cur_phone not in phone_clients:
+                continue
+
+            current_phones = load_phones()
+            p_entry = None
+            for px in current_phones:
+                if px['phone'] == cur_phone:
+                    p_entry = px
+                    reset_daily_counters_if_needed(px)
+                    break
+
+            if not p_entry:
+                continue
+            if p_entry['paused']:
+                continue
+            if p_entry['added_today'] >= 45:
+                continue
+
+            flood_time = 0
+            if p_entry['paused_until']:
+                paused_until_dt = datetime.datetime.fromisoformat(p_entry['paused_until'])
+                delta = (paused_until_dt - datetime.datetime.now()).total_seconds()
+                flood_time = max(int(delta), 0)
+            if flood_time > 0:
+                continue
+
+            selected_phone = cur_phone
+            break
+
+        if not selected_phone:
+            suspend_until_enough_phones(min_phones_available, load_phones(), username)
+            if not ADD_SESSION.get('running', False):
+                break
+            continue
+
+        client = phone_clients[selected_phone]
+        group_entity = group_entities[selected_phone]
+
+        # Risolviamo l'utente
+        try:
+            user_entity = await client.get_entity(username)
+        except errors.UsernameNotOccupiedError:
+            log(f"[{selected_phone}] {username}: l'username non esiste. Skipping.")
+            i += 1
+            ADD_SESSION['last_user_index'] = i
+            save_add_session()
+            continue
+        except Exception as ex:
+            err_msg = str(ex)
+            log(f"[{selected_phone}] Errore risoluzione {username}: {err_msg}. Skipping.")
+            if 'A wait of' in err_msg and 'seconds is required' in err_msg:
+                try:
+                    parts = err_msg.split('A wait of')[1].split('seconds is required')[0].strip()
+                    wait_seconds = int(parts)
+                    set_phone_pause(selected_phone, paused=True, seconds=wait_seconds)
+                    log(f"[{selected_phone}] Pausa per {wait_seconds} secondi (FloodWait).")
+                except:
+                    pass
+            i += 1
+            ADD_SESSION['last_user_index'] = i
+            save_add_session()
+            continue
+
+        # --- NUOVO CONTROLLO: skip in base a last_seen ---
+        if should_skip_user_by_last_seen(user_entity, skip_config):
+            log(f"[{selected_phone}] {username}: skip per impostazioni ultimo accesso (status={user_entity.status}).")
+            i += 1
+            ADD_SESSION['last_user_index'] = i
+            save_add_session()
+            continue
+
+        # Verifichiamo se è già nel gruppo
+        try:
+            await client(GetParticipantRequest(group_entity, user_entity))
+            log(f"[{selected_phone}] {username}: già nel gruppo. Skipping.")
+            i += 1
+            ADD_SESSION['last_user_index'] = i
+            save_add_session()
+            continue
+        except rpcerrorlist.UserNotParticipantError:
+            pass
+        except Exception as e:
+            log(f"[{selected_phone}] Errore controllando partecipazione di {username}: {e}. Skipping.")
+            i += 1
+            ADD_SESSION['last_user_index'] = i
+            save_add_session()
+            continue
+
+        # Tentiamo l'aggiunta
+        try:
+            await client(InviteToChannelRequest(group_entity, [user_entity]))
+            # Se non c'è eccezione, consideriamo aggiunto
+            update_phone_stats(selected_phone, added=1, total=1)
+            ADD_SESSION['total_added'] += 1
+            log(f"[{selected_phone}] Aggiunto con successo -> {username}")
+
+            # Verifica se risulta nel gruppo
             try:
-                c.disconnect()
-                log(f"Client disconnesso correttamente.")
-            except Exception as e:
-                log(f"Errore nella disconnessione del client: {e}")
+                await client(GetParticipantRequest(group_entity, user_entity))
+                log(f"[{selected_phone}] {username}: inserito e confermato nel gruppo.")
+            except:
+                # Non risulta dopo l'aggiunta
+                log(f"[{selected_phone}] ERRORE: {username} non risulta nel gruppo dopo l'aggiunta.")
+                update_phone_stats(selected_phone, non_result_err_inc=1)
+                # Carichiamo phone di nuovo per verificare contatore
+                p_after = load_phones()
+                for xx in p_after:
+                    if xx['phone'] == selected_phone:
+                        if xx['non_result_errors'] >= max_non_result_errors:
+                            set_phone_pause(selected_phone, paused=True, days=days_pause_non_result_errors)
+                            xx['non_result_errors'] = 0
+                            save_phones(p_after)
+                            log(f"[{selected_phone}] Superata soglia errori: pausa di {days_pause_non_result_errors} giorni.")
 
-        ADD_SESSION['running'] = False
-        log("Operazione di aggiunta terminata.")
+            await asyncio.sleep(sleep_seconds)
+
+        except errors.FloodWaitError as e:
+            wait_seconds = e.seconds
+            log(f"[{selected_phone}] FloodWaitError. Pausa {wait_seconds}s.")
+            set_phone_pause(selected_phone, paused=True, seconds=wait_seconds)
+            await asyncio.sleep(wait_seconds)
+        except errors.PeerFloodError:
+            log(f"[{selected_phone}] PeerFloodError: spam rilevato. Pausa 2 min.")
+            set_phone_pause(selected_phone, paused=True, seconds=120)
+            await asyncio.sleep(120)
+        except errors.UserPrivacyRestrictedError:
+            log(f"[{selected_phone}] {username}: Restrizione privacy. Non è possibile invitarlo direttamente, si può invitare tramite link.")
+        except errors.UserNotMutualContactError:
+            log(f"[{selected_phone}] {username}: non è contatto reciproco. Skipping.")
+        except Exception as ex:
+            err_msg = str(ex)
+            log(f"[{selected_phone}] Errore sconosciuto con {username}: {err_msg}. Skipping.")
+            if 'A wait of' in err_msg and 'seconds is required' in err_msg:
+                try:
+                    parts = err_msg.split('A wait of')[1].split('seconds is required')[0].strip()
+                    wait_seconds = int(parts)
+                    set_phone_pause(selected_phone, paused=True, seconds=wait_seconds)
+                    log(f"[{selected_phone}] Messo in pausa per {wait_seconds} secondi (FloodWait).")
+                except:
+                    pass
+
+        i += 1
+        ADD_SESSION['last_user_index'] = i
         save_add_session()
+
+    # After loop, reset last_user_index if done
+    if i >= len(users_list):
+        ADD_SESSION['last_user_index'] = 0
+        log("Lista utenti terminata. last_user_index riportato a 0.")
 
 
 @app.route('/api/start_adding', methods=['POST'])
@@ -911,6 +924,16 @@ def upload_excel():
     return jsonify({'user_list': '\n'.join(usernames)})
 
 
+def log(msg):
+    with LOCK:
+        ADD_SESSION['log'].append(msg)
+        save_add_session()
+    print(msg)
+
+
+# ---------------------------------------------------------------------
+# RUN APP
+# ---------------------------------------------------------------------
 if __name__ == '__main__':
     # Esegui Flask su host 0.0.0.0 per accettare connessioni esterne
     app.run(host="0.0.0.0", port=5050, debug=True, threaded=False, use_reloader=False)
