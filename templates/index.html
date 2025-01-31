@@ -11,22 +11,28 @@
       display: inline-block;
       width: 100%;
     }
-
     .dropdown select {
       width: 100%;
       padding: 8px;
       box-sizing: border-box;
     }
+    /* Per evidenziare la sezione attiva */
+    section {
+      display: none;
+    }
+    section.active {
+      display: block;
+    }
   </style>
 </head>
 <body>
 <div class="container">
-
   <nav>
     <button onclick="showSection('manage-numbers')">Gestione Numeri</button>
     <button onclick="showSection('log-in')">Log In</button>
     <button onclick="showSection('add-users')">Aggiungi Utenti</button>
     <button onclick="showSection('summary')">Riepilogo</button>
+    <button onclick="restartTmux()">Riavvia TMUX</button>
   </nav>
 
   <!-- SEZIONE Gestione Numeri -->
@@ -95,12 +101,11 @@
   <section id="add-users">
     <h2>Aggiungi Utenti a un Gruppo</h2>
     <div class="form-container">
-
       <label for="group_username">Username del Gruppo (es: @nomegruppo):</label>
       <input type="text" id="group_username" placeholder="@nomegruppo" />
       
       <label for="user_list">Lista Utenti (uno per riga):</label>
-      <textarea id="user_list" rows="8" placeholder="@user1\n@user2\n@user3"></textarea>
+      <textarea id="user_list" rows="8" placeholder="@user1&#10;@user2&#10;@user3"></textarea>
 
       <!-- Caricamento da file Excel -->
       <label for="excel_file">Oppure carica un file Excel (prima colonna = username):</label>
@@ -121,7 +126,6 @@
       <input type="number" id="sleep_seconds" value="10" />
 
       <hr/>
-      <!-- Nuova sezione: skip in base a last seen con menu a tendina -->
       <h3>Opzioni di ultimo accesso: NON inserire se:</h3>
       <div class="dropdown">
         <select id="skip_options" multiple>
@@ -136,7 +140,6 @@
           </optgroup>
         </select>
       </div>
-
       <small>Tenere premuto Ctrl (Windows) o Command (Mac) per selezionare più opzioni.</small>
 
       <button onclick="startAdding()">Avvia Aggiunta</button>
