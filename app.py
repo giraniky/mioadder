@@ -526,15 +526,16 @@ def add_users_to_group_thread(group_username, users_list):
         save_add_session()
         return
 
+    # Controllo che ogni phone sia già nel gruppo
     for phone, client in phone_clients.items():
         try:
             me = client.get_me()
-            safe_telethon_call(client, GetParticipantRequest, group_entities[phone], me)
+            safe_telethon_call(client, GetParticipantRequest, channel=group_entities[phone], user=me)
             log(f"[{phone}] Il numero è già nel gruppo.")
         except rpcerrorlist.UserNotParticipantError:
             try:
                 safe_telethon_call(client, JoinChannelRequest, group_entities[phone])
-                safe_telethon_call(client, GetParticipantRequest, group_entities[phone], me)
+                safe_telethon_call(client, GetParticipantRequest, channel=group_entities[phone], user=me)
                 log(f"[{phone}] Unito al gruppo con successo.")
             except Exception as e:
                 log(f"[{phone}] Errore unendosi al gruppo: {e}. Pausa del numero.")
@@ -648,7 +649,7 @@ def add_users_to_group_thread(group_username, users_list):
             continue
 
         try:
-            safe_telethon_call(client, GetParticipantRequest, group_entity, user_entity)
+            safe_telethon_call(client, GetParticipantRequest, channel=group_entity, user=user_entity)
             log(f"[{selected_phone}] {username}: già nel gruppo. Skipping.")
             i += 1
             ADD_SESSION['last_user_index'] = i
@@ -670,7 +671,7 @@ def add_users_to_group_thread(group_username, users_list):
             log(f"[{selected_phone}] Aggiunto con successo -> {username}")
 
             try:
-                safe_telethon_call(client, GetParticipantRequest, group_entity, user_entity)
+                safe_telethon_call(client, GetParticipantRequest, channel=group_entity, user=user_entity)
                 log(f"[{selected_phone}] {username}: inserito e confermato nel gruppo.")
             except:
                 log(f"[{selected_phone}] ERRORE: {username} non risulta nel gruppo dopo l'aggiunta.")
@@ -855,11 +856,12 @@ def api_restart_tmux():
     Riavvia la sessione tmux denominata "mioadder" eseguendo:
       - tmux kill-session -t mioadder
       - tmux new-session -d -s mioadder python app.py
-    Assicurarsi che tmux sia installato e che l’utente che esegue Flask abbia i permessi.
+    Il comando viene eseguito nella directory corrente dell'applicazione.
     """
     try:
-        subprocess.run(["tmux", "kill-session", "-t", "mioadder"], check=False)
-        subprocess.run(["tmux", "new-session", "-d", "-s", "mioadder", "python", "app.py"], check=True)
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        subprocess.run(["tmux", "kill-session", "-t", "mioadder"], check=False, cwd=current_dir)
+        subprocess.run(["tmux", "new-session", "-d", "-s", "mioadder", "python", "app.py"], check=True, cwd=current_dir)
         return jsonify({"success": True, "message": "Sessione TMUX 'mioadder' riavviata con successo."})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
