@@ -1,5 +1,3 @@
-// script.js
-
 // -------------------------------------------------------
 // Mostra la sezione selezionata
 function showSection(id) {
@@ -260,7 +258,6 @@ async function startAdding() {
   let days_pause_non_result_errors = parseInt(document.getElementById('days_pause_non_result_errors').value) || 2;
   let sleep_seconds = parseInt(document.getElementById('sleep_seconds').value) || 10;
 
-  // Lettura opzioni di skip dal dropdown
   let skipOptionsSelect = document.getElementById('skip_options');
   let selectedOptions = Array.from(skipOptionsSelect.selectedOptions).map(option => option.value);
 
@@ -393,12 +390,30 @@ function pad(num) {
 }
 
 // -------------------------------------------------------
+// RIAVVIO TMUX
+// -------------------------------------------------------
+async function restartTmux() {
+  if (!confirm("Sei sicuro di voler riavviare la sessione TMUX?")) return;
+  try {
+    let res = await fetch('/api/restart_tmux', { method: 'POST' });
+    let data = await res.json();
+    if (data.success) {
+      alert(data.message || "Sessione TMUX riavviata con successo!");
+    } else {
+      alert("Errore nel riavviare TMUX: " + data.message);
+    }
+  } catch (err) {
+    console.error('Errore restartTmux:', err);
+    alert("Errore nel riavviare la sessione TMUX.");
+  }
+}
+
+// -------------------------------------------------------
 window.addEventListener('DOMContentLoaded', () => {
   showSection('manage-numbers');
   loadPhones();
   loadSummary();
 
-  // Se c'è un'operazione in corso, aggiorniamo i log
   (async () => {
     try {
       let res = await fetch('/api/log_status');
