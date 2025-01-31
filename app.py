@@ -3,7 +3,6 @@ import json
 import threading
 import time
 import datetime
-import asyncio
 from flask import Flask, render_template, request, jsonify
 from werkzeug.utils import secure_filename
 
@@ -32,9 +31,10 @@ os.makedirs(SESSIONS_FOLDER, exist_ok=True)
 # Dizionario in memoria per OTP
 OTP_DICT = {}
 
-# Stato dell'operazione di aggiunta (caricato da file a inizio)
+# Stato dell'operazione di aggiunta (caricato da file all'inizio)
 ADD_SESSION = {}
 
+# Lock per sincronizzare l'accesso ai file
 LOCK = threading.Lock()
 
 
@@ -71,13 +71,21 @@ def load_phones():
                         p['paused'] = False
                         p['paused_until'] = None
             return data
-        except:
+        except json.JSONDecodeError:
+            print("Errore nel decodificare JSON da phones.json")
+            return []
+        except Exception as e:
+            print(f"Errore nel caricamento dei numeri: {e}")
             return []
 
+
 def save_phones(phones):
-    with LOCK:  # Protegge l'accesso al file
-        with open(PHONES_FILE, 'w', encoding='utf-8') as f:
-            json.dump(phones, f, indent=2, ensure_ascii=False)
+    with LOCK:
+        try:
+            with open(PHONES_FILE, 'w', encoding='utf-8') as f:
+                json.dump(phones, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"Errore nel salvare phones.json: {e}")
 
 
 def reset_daily_counters_if_needed(phone_entry):
@@ -85,6 +93,7 @@ def reset_daily_counters_if_needed(phone_entry):
     if phone_entry.get('last_reset_date') != today_str:
         phone_entry['added_today'] = 0
         phone_entry['last_reset_date'] = today_str
+
 
 def load_add_session():
     with LOCK:
@@ -94,13 +103,21 @@ def load_add_session():
             with open(LOG_STATUS_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             return data
-        except:
+        except json.JSONDecodeError:
+            print("Errore nel decodificare JSON da add_session.json")
             return {}
+        except Exception as e:
+            print(f"Errore nel caricamento dello stato di aggiunta: {e}")
+            return {}
+
 
 def save_add_session():
     with LOCK:
-        with open(LOG_STATUS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(ADD_SESSION, f, indent=2, ensure_ascii=False)
+        try:
+            with open(LOG_STATUS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(ADD_SESSION, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"Errore nel salvare add_session.json: {e}")
 
 
 def create_telegram_client(phone_entry):
@@ -109,8 +126,10 @@ def create_telegram_client(phone_entry):
     api_hash = phone_entry['api_hash']
     return TelegramClient(session_file, api_id, api_hash)
 
+
 # Carichiamo lo stato ADD_SESSION
 ADD_SESSION = load_add_session()
+
 
 def count_available_phones(phones):
     now = datetime.datetime.now()
@@ -146,12 +165,12 @@ def count_available_phones(phones):
         available += 1
     return available
 
+
 def suspend_until_enough_phones(min_phones, phones, username):
     global ADD_SESSION
     if ADD_SESSION.get('running', False):
         log_msg = f"Nessun phone disponibile per {username}, sospendo finché non tornano almeno {min_phones} numeri disponibili."
-        ADD_SESSION['log'].append(log_msg)
-        save_add_session()
+        log(log_msg)
 
     while True:
         if not ADD_SESSION.get('running', False):
@@ -159,10 +178,10 @@ def suspend_until_enough_phones(min_phones, phones, username):
         current_avail = count_available_phones(phones)
         if current_avail >= min_phones:
             resume_msg = f"Sono nuovamente disponibili {current_avail} numeri: riprendo l'aggiunta di {username}."
-            ADD_SESSION['log'].append(resume_msg)
-            save_add_session()
+            log(resume_msg)
             return
         time.sleep(60)
+
 
 def update_phone_stats(phone_number, added=0, total=0, non_result_err_inc=0):
     phones = load_phones()
@@ -177,6 +196,7 @@ def update_phone_stats(phone_number, added=0, total=0, non_result_err_inc=0):
                 p['non_result_errors'] += non_result_err_inc
             save_phones(phones)
             return
+
 
 def set_phone_pause(phone_number, paused=True, seconds=0, days=0):
     phones = load_phones()
@@ -196,6 +216,7 @@ def set_phone_pause(phone_number, paused=True, seconds=0, days=0):
                 p['paused_until'] = None
             save_phones(phones)
             return
+
 
 # Funzione di utilità per controllare se bisogna saltare l'utente
 # in base al suo "last seen" e alle impostazioni scelte in interfaccia
@@ -248,6 +269,7 @@ def should_skip_user_by_last_seen(user_entity, skip_config):
 
     return False
 
+
 # ---------------------------------------------------------------------
 # ROTTE FRONTEND
 # ---------------------------------------------------------------------
@@ -255,6 +277,7 @@ def should_skip_user_by_last_seen(user_entity, skip_config):
 @app.route('/')
 def index():
     return render_template('index.html')
+
 
 # SEZIONE 1: GESTIONE NUMERI
 @app.route('/api/phones', methods=['GET'])
@@ -265,12 +288,16 @@ def api_list_phones():
     save_phones(phones)
     return jsonify(phones)
 
+
 @app.route('/api/phones', methods=['POST'])
 def api_add_phone():
     data = request.json
-    phone = data['phone']
-    api_id = data['api_id']
-    api_hash = data['api_hash']
+    phone = data.get('phone', '').strip()
+    api_id = data.get('api_id', '').strip()
+    api_hash = data.get('api_hash', '').strip()
+
+    if not phone or not api_id or not api_hash:
+        return jsonify({'error': 'Tutti i campi sono richiesti.'}), 400
 
     phones = load_phones()
     for p in phones:
@@ -292,12 +319,14 @@ def api_add_phone():
     save_phones(phones)
     return jsonify({'success': True})
 
+
 @app.route('/api/phones/<phone>', methods=['DELETE'])
 def api_remove_phone(phone):
     phones = load_phones()
     phones = [p for p in phones if p['phone'] != phone]
     save_phones(phones)
     return jsonify({'success': True})
+
 
 @app.route('/api/phones/<phone>/pause', methods=['POST'])
 def api_pause_phone(phone):
@@ -313,11 +342,15 @@ def api_pause_phone(phone):
             return jsonify({'success': True})
     return jsonify({'error': 'Phone not found'}), 404
 
+
 # SEZIONE 2: LOGIN E GESTIONE OTP
 @app.route('/api/send_code', methods=['POST'])
 def api_send_code():
     data = request.json
-    phone = data['phone']
+    phone = data.get('phone', '').strip()
+
+    if not phone:
+        return jsonify({'error': 'Il campo phone è richiesto.'}), 400
 
     phones = load_phones()
     phone_entry = None
@@ -344,11 +377,15 @@ def api_send_code():
     finally:
         client.disconnect()
 
+
 @app.route('/api/validate_code', methods=['POST'])
 def api_validate_code():
     data = request.json
-    phone = data['phone']
-    code = data['code']
+    phone = data.get('phone', '').strip()
+    code = data.get('code', '').strip()
+
+    if not phone or not code:
+        return jsonify({'error': 'I campi phone e code sono richiesti.'}), 400
 
     if phone not in OTP_DICT:
         return jsonify({'error': 'No OTP session found for this phone'}), 400
@@ -362,7 +399,10 @@ def api_validate_code():
     if not phone_entry:
         return jsonify({'error': 'Phone not found'}), 404
 
-    phone_code_hash = OTP_DICT[phone]['phone_code_hash']
+    phone_code_hash = OTP_DICT[phone].get('phone_code_hash')
+    if not phone_code_hash:
+        return jsonify({'error': 'No phone_code_hash found for this phone'}), 400
+
     client = create_telegram_client(phone_entry)
     try:
         client.connect()
@@ -384,11 +424,15 @@ def api_validate_code():
     finally:
         client.disconnect()
 
+
 @app.route('/api/validate_password', methods=['POST'])
 def api_validate_password():
     data = request.json
-    phone = data['phone']
-    password = data['password']
+    phone = data.get('phone', '').strip()
+    password = data.get('password', '').strip()
+
+    if not phone or not password:
+        return jsonify({'error': 'I campi phone e password sono richiesti.'}), 400
 
     if phone not in OTP_DICT:
         return jsonify({'error': 'No OTP session found for this phone'}), 400
@@ -416,6 +460,7 @@ def api_validate_password():
         return jsonify({'error': str(e)}), 400
     finally:
         client.disconnect()
+
 
 # SEZIONE 3: AGGIUNTA UTENTI AL GRUPPO
 def add_users_to_group_thread(group_username, users_list):
@@ -446,282 +491,285 @@ def add_users_to_group_thread(group_username, users_list):
         'user_status_empty': ADD_SESSION.get('user_status_empty', False)
     }
 
-    # Event loop
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
     # Carichiamo i phone
     phones = load_phones()
     phone_clients = {}
 
     def log(msg):
-        ADD_SESSION['log'].append(msg)
-        save_add_session()
+        with LOCK:
+            ADD_SESSION['log'].append(msg)
+            save_add_session()
         print(msg)
 
-    # Connessione
-    for p in phones:
-        reset_daily_counters_if_needed(p)
-        session_path = os.path.join(SESSIONS_FOLDER, f"{p['phone']}.session")
-        if os.path.isfile(session_path) and not p['paused']:
-            try:
-                c = create_telegram_client(p)
-                c.connect()
-                phone_clients[p['phone']] = c
-            except Exception as e:
-                log(f"[{p['phone']}] Errore di connessione: {e}")
+    try:
+        # Connessione
+        for p in phones:
+            reset_daily_counters_if_needed(p)
+            session_path = os.path.join(SESSIONS_FOLDER, f"{p['phone']}.session")
+            if os.path.isfile(session_path) and not p['paused']:
+                try:
+                    c = create_telegram_client(p)
+                    c.connect()
+                    phone_clients[p['phone']] = c
+                except Exception as e:
+                    log(f"[{p['phone']}] Errore di connessione: {e}")
 
-    if not phone_clients:
-        log("Nessun numero disponibile con sessione valida. Interruzione.")
-        ADD_SESSION['running'] = False
-        save_add_session()
-        return
-
-    # Recupero entità gruppo
-    group_entities = {}
-    for phone, client in list(phone_clients.items()):
-        try:
-            grp_ent = client.get_entity(group_username)
-            if isinstance(grp_ent, (tl.types.Channel, tl.types.Chat)):
-                group_entities[phone] = grp_ent
-                log(f"[{phone}] Gruppo '{group_username}' risolto correttamente.")
-            else:
-                log(f"[{phone}] Gruppo '{group_username}' non è un canale/supergruppo. Pausa del numero.")
-                set_phone_pause(phone, paused=True)
-        except errors.UsernameNotOccupiedError:
-            log(f"[{phone}] Gruppo '{group_username}' non esiste. Pausa del numero.")
-            set_phone_pause(phone, paused=True)
-        except errors.ChannelPrivateError:
-            log(f"[{phone}] Gruppo '{group_username}' è privato e non accessibile. Pausa del numero.")
-            set_phone_pause(phone, paused=True)
-        except Exception as e:
-            log(f"[{phone}] Impossibile recuperare il gruppo '{group_username}': {e}. Pausa del numero.")
-            set_phone_pause(phone, paused=True)
-
-    # Rimuoviamo i client che non possono gestire il gruppo
-    for phone in list(phone_clients.keys()):
-        if phone not in group_entities:
-            phone_clients[phone].disconnect()
-            phone_clients.pop(phone)
-
-    if not group_entities:
-        log("Nessun client può accedere al gruppo. Interruzione.")
-        ADD_SESSION['running'] = False
-        for c in phone_clients.values():
-            c.disconnect()
-        save_add_session()
-        return
-
-    # Aggiunta di un controllo: assicurarsi che ogni phone sia già nel gruppo
-    for phone, client in phone_clients.items():
-        try:
-            me = client.get_me()
-            client(GetParticipantRequest(group_entities[phone], me))
-            log(f"[{phone}] Il numero è già nel gruppo.")
-        except rpcerrorlist.UserNotParticipantError:
-            try:
-                client(JoinChannelRequest(group_entities[phone]))
-                # Verifica se è riuscito ad unirsi
-                client(GetParticipantRequest(group_entities[phone], me))
-                log(f"[{phone}] Unito al gruppo con successo.")
-            except Exception as e:
-                log(f"[{phone}] Errore unendosi al gruppo: {e}. Pausa del numero.")
-                set_phone_pause(phone, paused=True)
-        except Exception as e:
-            log(f"[{phone}] Errore controllando la partecipazione al gruppo: {e}. Pausa del numero.")
-            set_phone_pause(phone, paused=True)
-
-    # Rimuoviamo i client che non sono riusciti ad unirsi al gruppo
-    for phone in list(phone_clients.keys()):
-        phones_updated = load_phones()
-        for p in phones_updated:
-            if p['phone'] == phone and p['paused']:
-                phone_clients[phone].disconnect()
-                phone_clients.pop(phone)
-                break
-
-    if not phone_clients:
-        log("Nessun client disponibile dopo il controllo di partecipazione al gruppo. Interruzione.")
-        ADD_SESSION['running'] = False
-        save_add_session()
-        return
-
-    phone_list = sorted(list(phone_clients.keys()))
-    phone_index = 0
-
-    i = ADD_SESSION.get('last_user_index', 0)
-    while i < len(users_list):
-        if not ADD_SESSION.get('running', False):
-            break
-        username = users_list[i].strip()
-        if not username:
-            i += 1
-            ADD_SESSION['last_user_index'] = i
+        if not phone_clients:
+            log("Nessun numero disponibile con sessione valida. Interruzione.")
+            ADD_SESSION['running'] = False
             save_add_session()
-            continue
+            return
 
-        # Cerca un phone disponibile
-        attempts = 0
-        selected_phone = None
-        while attempts < len(phone_list):
-            cur_phone = phone_list[phone_index]
-            phone_index = (phone_index + 1) % len(phone_list)
-            attempts += 1
+        # Recupero entità gruppo
+        group_entities = {}
+        for phone, client in list(phone_clients.items()):
+            try:
+                grp_ent = client.get_entity(group_username)
+                if isinstance(grp_ent, (tl.types.Channel, tl.types.Chat)):
+                    group_entities[phone] = grp_ent
+                    log(f"[{phone}] Gruppo '{group_username}' risolto correttamente.")
+                else:
+                    log(f"[{phone}] Gruppo '{group_username}' non è un canale/supergruppo. Pausa del numero.")
+                    set_phone_pause(phone, paused=True)
+            except errors.UsernameNotOccupiedError:
+                log(f"[{phone}] Gruppo '{group_username}' non esiste. Pausa del numero.")
+                set_phone_pause(phone, paused=True)
+            except errors.ChannelPrivateError:
+                log(f"[{phone}] Gruppo '{group_username}' è privato e non accessibile. Pausa del numero.")
+                set_phone_pause(phone, paused=True)
+            except Exception as e:
+                log(f"[{phone}] Impossibile recuperare il gruppo '{group_username}': {e}. Pausa del numero.")
+                set_phone_pause(phone, paused=True)
 
-            if cur_phone not in phone_clients:
-                continue
+        # Rimuoviamo i client che non possono gestire il gruppo
+        for phone in list(phone_clients.keys()):
+            if phone not in group_entities:
+                phone_clients[phone].disconnect()
+                del phone_clients[phone]
 
-            current_phones = load_phones()
-            p_entry = None
-            for px in current_phones:
-                if px['phone'] == cur_phone:
-                    p_entry = px
-                    reset_daily_counters_if_needed(px)
+        if not group_entities:
+            log("Nessun client può accedere al gruppo. Interruzione.")
+            ADD_SESSION['running'] = False
+            for c in phone_clients.values():
+                c.disconnect()
+            save_add_session()
+            return
+
+        # Aggiunta di un controllo: assicurarsi che ogni phone sia già nel gruppo
+        for phone, client in phone_clients.items():
+            try:
+                me = client.get_me()
+                client(GetParticipantRequest(group_entities[phone], me))
+                log(f"[{phone}] Il numero è già nel gruppo.")
+            except rpcerrorlist.UserNotParticipantError:
+                try:
+                    client(JoinChannelRequest(group_entities[phone]))
+                    # Verifica se è riuscito ad unirsi
+                    client(GetParticipantRequest(group_entities[phone], me))
+                    log(f"[{phone}] Unito al gruppo con successo.")
+                except Exception as e:
+                    log(f"[{phone}] Errore unendosi al gruppo: {e}. Pausa del numero.")
+                    set_phone_pause(phone, paused=True)
+            except Exception as e:
+                log(f"[{phone}] Errore controllando la partecipazione al gruppo: {e}. Pausa del numero.")
+                set_phone_pause(phone, paused=True)
+
+        # Rimuoviamo i client che non sono riusciti ad unirsi al gruppo
+        for phone in list(phone_clients.keys()):
+            phones_updated = load_phones()
+            for p in phones_updated:
+                if p['phone'] == phone and p['paused']:
+                    phone_clients[phone].disconnect()
+                    del phone_clients[phone]
                     break
 
-            if not p_entry:
-                continue
-            if p_entry['paused']:
-                continue
-            if p_entry['added_today'] >= 45:
-                continue
+        if not phone_clients:
+            log("Nessun client disponibile dopo il controllo di partecipazione al gruppo. Interruzione.")
+            ADD_SESSION['running'] = False
+            save_add_session()
+            return
 
-            flood_time = 0
-            if p_entry['paused_until']:
-                paused_until_dt = datetime.datetime.fromisoformat(p_entry['paused_until'])
-                delta = (paused_until_dt - datetime.datetime.now()).total_seconds()
-                flood_time = max(int(delta), 0)
-            if flood_time > 0:
-                continue
+        phone_list = sorted(list(phone_clients.keys()))
+        phone_index = 0
 
-            selected_phone = cur_phone
-            break
-
-        if not selected_phone:
-            suspend_until_enough_phones(min_phones_available, load_phones(), username)
+        i = ADD_SESSION.get('last_user_index', 0)
+        while i < len(users_list):
             if not ADD_SESSION.get('running', False):
                 break
-            continue
+            username = users_list[i].strip()
+            if not username:
+                i += 1
+                ADD_SESSION['last_user_index'] = i
+                save_add_session()
+                continue
 
-        client = phone_clients[selected_phone]
-        group_entity = group_entities[selected_phone]
+            # Cerca un phone disponibile
+            attempts = 0
+            selected_phone = None
+            while attempts < len(phone_list):
+                cur_phone = phone_list[phone_index]
+                phone_index = (phone_index + 1) % len(phone_list)
+                attempts += 1
 
-        # Risolviamo l'utente
-        try:
-            user_entity = client.get_entity(username)
-        except errors.UsernameNotOccupiedError:
-            log(f"[{selected_phone}] {username}: l'username non esiste. Skipping.")
-            i += 1
-            ADD_SESSION['last_user_index'] = i
-            save_add_session()
-            continue
-        except Exception as ex:
-            err_msg = str(ex)
-            log(f"[{selected_phone}] Errore risoluzione {username}: {err_msg}. Skipping.")
-            if 'A wait of' in err_msg and 'seconds is required' in err_msg:
-                try:
-                    parts = err_msg.split('A wait of')[1].split('seconds is required')[0].strip()
-                    wait_seconds = int(parts)
-                    set_phone_pause(selected_phone, paused=True, seconds=wait_seconds)
-                    log(f"[{selected_phone}] Pausa per {wait_seconds} secondi (FloodWait).")
-                except:
-                    pass
-            i += 1
-            ADD_SESSION['last_user_index'] = i
-            save_add_session()
-            continue
+                if cur_phone not in phone_clients:
+                    continue
 
-        # --- NUOVO CONTROLLO: skip in base a last_seen ---
-        if should_skip_user_by_last_seen(user_entity, skip_config):
-            log(f"[{selected_phone}] {username}: skip per impostazioni ultimo accesso (status={user_entity.status}).")
-            i += 1
-            ADD_SESSION['last_user_index'] = i
-            save_add_session()
-            continue
+                current_phones = load_phones()
+                p_entry = None
+                for px in current_phones:
+                    if px['phone'] == cur_phone:
+                        p_entry = px
+                        reset_daily_counters_if_needed(px)
+                        break
 
-        # Verifichiamo se è già nel gruppo
-        try:
-            client(GetParticipantRequest(group_entity, user_entity))
-            log(f"[{selected_phone}] {username}: già nel gruppo. Skipping.")
-            i += 1
-            ADD_SESSION['last_user_index'] = i
-            save_add_session()
-            continue
-        except rpcerrorlist.UserNotParticipantError:
-            pass
-        except Exception as e:
-            log(f"[{selected_phone}] Errore controllando partecipazione di {username}: {e}. Skipping.")
-            i += 1
-            ADD_SESSION['last_user_index'] = i
-            save_add_session()
-            continue
+                if not p_entry:
+                    continue
+                if p_entry['paused']:
+                    continue
+                if p_entry['added_today'] >= 45:
+                    continue
 
-        # Tentiamo l'aggiunta
-        try:
-            client(InviteToChannelRequest(group_entity, [user_entity]))
-            # Se non c'è eccezione, consideriamo aggiunto
-            update_phone_stats(selected_phone, added=1, total=1)
-            ADD_SESSION['total_added'] += 1
-            log(f"[{selected_phone}] Aggiunto con successo -> {username}")
+                flood_time = 0
+                if p_entry['paused_until']:
+                    paused_until_dt = datetime.datetime.fromisoformat(p_entry['paused_until'])
+                    delta = (paused_until_dt - datetime.datetime.now()).total_seconds()
+                    flood_time = max(int(delta), 0)
+                if flood_time > 0:
+                    continue
 
-            # Verifica se risulta nel gruppo
+                selected_phone = cur_phone
+                break
+
+            if not selected_phone:
+                suspend_until_enough_phones(min_phones_available, load_phones(), username)
+                if not ADD_SESSION.get('running', False):
+                    break
+                continue
+
+            client = phone_clients[selected_phone]
+            group_entity = group_entities[selected_phone]
+
+            # Risolviamo l'utente
+            try:
+                user_entity = client.get_entity(username)
+            except errors.UsernameNotOccupiedError:
+                log(f"[{selected_phone}] {username}: l'username non esiste. Skipping.")
+                i += 1
+                ADD_SESSION['last_user_index'] = i
+                save_add_session()
+                continue
+            except Exception as ex:
+                err_msg = str(ex)
+                log(f"[{selected_phone}] Errore risoluzione {username}: {err_msg}. Skipping.")
+                if 'A wait of' in err_msg and 'seconds is required' in err_msg:
+                    try:
+                        parts = err_msg.split('A wait of')[1].split('seconds is required')[0].strip()
+                        wait_seconds = int(parts)
+                        set_phone_pause(selected_phone, paused=True, seconds=wait_seconds)
+                        log(f"[{selected_phone}] Pausa per {wait_seconds} secondi (FloodWait).")
+                    except:
+                        pass
+                i += 1
+                ADD_SESSION['last_user_index'] = i
+                save_add_session()
+                continue
+
+            # --- NUOVO CONTROLLO: skip in base a last_seen ---
+            if should_skip_user_by_last_seen(user_entity, skip_config):
+                log(f"[{selected_phone}] {username}: skip per impostazioni ultimo accesso (status={user_entity.status}).")
+                i += 1
+                ADD_SESSION['last_user_index'] = i
+                save_add_session()
+                continue
+
+            # Verifichiamo se è già nel gruppo
             try:
                 client(GetParticipantRequest(group_entity, user_entity))
-                log(f"[{selected_phone}] {username}: inserito e confermato nel gruppo.")
-            except:
-                # Non risulta dopo l'aggiunta
-                log(f"[{selected_phone}] ERRORE: {username} non risulta nel gruppo dopo l'aggiunta.")
-                update_phone_stats(selected_phone, non_result_err_inc=1)
-                # Carichiamo phone di nuovo per verificare contatore
-                p_after = load_phones()
-                for xx in p_after:
-                    if xx['phone'] == selected_phone:
-                        if xx['non_result_errors'] >= max_non_result_errors:
-                            set_phone_pause(selected_phone, paused=True, days=days_pause_non_result_errors)
-                            xx['non_result_errors'] = 0
-                            save_phones(p_after)
-                            log(f"[{selected_phone}] Superata soglia errori: pausa di {days_pause_non_result_errors} giorni.")
+                log(f"[{selected_phone}] {username}: già nel gruppo. Skipping.")
+                i += 1
+                ADD_SESSION['last_user_index'] = i
+                save_add_session()
+                continue
+            except rpcerrorlist.UserNotParticipantError:
+                pass
+            except Exception as e:
+                log(f"[{selected_phone}] Errore controllando partecipazione di {username}: {e}. Skipping.")
+                i += 1
+                ADD_SESSION['last_user_index'] = i
+                save_add_session()
+                continue
 
-            time.sleep(sleep_seconds)
+            # Tentiamo l'aggiunta
+            try:
+                client(InviteToChannelRequest(group_entity, [user_entity]))
+                # Se non c'è eccezione, consideriamo aggiunto
+                update_phone_stats(selected_phone, added=1, total=1)
+                ADD_SESSION['total_added'] += 1
+                log(f"[{selected_phone}] Aggiunto con successo -> {username}")
 
-        except errors.FloodWaitError as e:
-            wait_seconds = e.seconds
-            log(f"[{selected_phone}] FloodWaitError. Pausa {wait_seconds}s.")
-            set_phone_pause(selected_phone, paused=True, seconds=wait_seconds)
-            time.sleep(wait_seconds)
-        except errors.PeerFloodError:
-            log(f"[{selected_phone}] PeerFloodError: spam rilevato. Pausa 2 min.")
-            set_phone_pause(selected_phone, paused=True, seconds=120)
-        except errors.UserPrivacyRestrictedError:
-            log(f"[{selected_phone}] {username}: Restrizione privacy. Non è possibile invitarlo direttamente, si può invitare tramite link.")
-        except errors.UserNotMutualContactError:
-            log(f"[{selected_phone}] {username}: non è contatto reciproco. Skipping.")
-        except Exception as ex:
-            err_msg = str(ex)
-            log(f"[{selected_phone}] Errore sconosciuto con {username}: {err_msg}. Skipping.")
-            if 'A wait of' in err_msg and 'seconds is required' in err_msg:
+                # Verifica se risulta nel gruppo
                 try:
-                    parts = err_msg.split('A wait of')[1].split('seconds is required')[0].strip()
-                    wait_seconds = int(parts)
-                    set_phone_pause(selected_phone, paused=True, seconds=wait_seconds)
-                    log(f"[{selected_phone}] Messo in pausa per {wait_seconds} secondi (FloodWait).")
+                    client(GetParticipantRequest(group_entity, user_entity))
+                    log(f"[{selected_phone}] {username}: inserito e confermato nel gruppo.")
                 except:
-                    pass
+                    # Non risulta dopo l'aggiunta
+                    log(f"[{selected_phone}] ERRORE: {username} non risulta nel gruppo dopo l'aggiunta.")
+                    update_phone_stats(selected_phone, non_result_err_inc=1)
+                    # Carichiamo phone di nuovo per verificare contatore
+                    p_after = load_phones()
+                    for xx in p_after:
+                        if xx['phone'] == selected_phone:
+                            if xx['non_result_errors'] >= max_non_result_errors:
+                                set_phone_pause(selected_phone, paused=True, days=days_pause_non_result_errors)
+                                xx['non_result_errors'] = 0
+                                save_phones(p_after)
+                                log(f"[{selected_phone}] Superata soglia errori: pausa di {days_pause_non_result_errors} giorni.")
 
-        i += 1
-        ADD_SESSION['last_user_index'] = i
+                time.sleep(sleep_seconds)
+
+            except errors.FloodWaitError as e:
+                wait_seconds = e.seconds
+                log(f"[{selected_phone}] FloodWaitError. Pausa {wait_seconds}s.")
+                set_phone_pause(selected_phone, paused=True, seconds=wait_seconds)
+                time.sleep(wait_seconds)
+            except errors.PeerFloodError:
+                log(f"[{selected_phone}] PeerFloodError: spam rilevato. Pausa 2 min.")
+                set_phone_pause(selected_phone, paused=True, seconds=120)
+            except errors.UserPrivacyRestrictedError:
+                log(f"[{selected_phone}] {username}: Restrizione privacy. Non è possibile invitarlo direttamente, si può invitare tramite link.")
+            except errors.UserNotMutualContactError:
+                log(f"[{selected_phone}] {username}: non è contatto reciproco. Skipping.")
+            except Exception as ex:
+                err_msg = str(ex)
+                log(f"[{selected_phone}] Errore sconosciuto con {username}: {err_msg}. Skipping.")
+                if 'A wait of' in err_msg and 'seconds is required' in err_msg:
+                    try:
+                        parts = err_msg.split('A wait of')[1].split('seconds is required')[0].strip()
+                        wait_seconds = int(parts)
+                        set_phone_pause(selected_phone, paused=True, seconds=wait_seconds)
+                        log(f"[{selected_phone}] Messo in pausa per {wait_seconds} secondi (FloodWait).")
+                    except:
+                        pass
+
+            i += 1
+            ADD_SESSION['last_user_index'] = i
+            save_add_session()
+
+    except Exception as e:
+        log(f"Errore nell'operazione di aggiunta: {e}")
+    finally:
+        # Assicurarsi che tutti i client siano disconnessi
+        for c in phone_clients.values():
+            try:
+                c.disconnect()
+                log(f"Client disconnesso correttamente.")
+            except Exception as e:
+                log(f"Errore nella disconnessione del client: {e}")
+
+        ADD_SESSION['running'] = False
+        log("Operazione di aggiunta terminata.")
         save_add_session()
 
-    if i >= len(users_list):
-        ADD_SESSION['last_user_index'] = 0
-        log("Lista utenti terminata. last_user_index riportato a 0.")
-
-    for c in phone_clients.values():
-        c.disconnect()
-
-    ADD_SESSION['running'] = False
-    log("Operazione di aggiunta terminata.")
-    save_add_session()
 
 @app.route('/api/start_adding', methods=['POST'])
 def api_start_adding():
@@ -762,10 +810,12 @@ def api_start_adding():
 
     save_add_session()
 
+    # Avviare il thread di aggiunta
     t = threading.Thread(target=add_users_to_group_thread, args=(group_username, users_list))
     t.start()
 
     return jsonify({'success': True})
+
 
 @app.route('/api/log_status', methods=['GET'])
 def api_log_status():
@@ -776,16 +826,19 @@ def api_log_status():
         'log': ADD_SESSION.get('log', []),
     })
 
+
 @app.route('/api/stop_adding', methods=['POST'])
 def api_stop_adding():
     global ADD_SESSION
     if ADD_SESSION.get('running', False):
         ADD_SESSION['running'] = False
-        ADD_SESSION['log'].append("Operazione fermata manualmente dall'utente.")
+        log_msg = "Operazione fermata manualmente dall'utente."
+        log(log_msg)
         save_add_session()
         return jsonify({"success": True, "message": "Operazione fermata con successo."})
     else:
         return jsonify({"success": False, "message": "Nessuna operazione in corso"}), 400
+
 
 # SEZIONE 4: RIEPILOGO
 @app.route('/api/summary', methods=['GET'])
@@ -813,6 +866,7 @@ def api_summary():
         'phones': summary_list
     })
 
+
 # SEZIONE 5: CARICAMENTO FILE EXCEL
 @app.route('/api/upload_excel', methods=['POST'])
 def upload_excel():
@@ -832,7 +886,10 @@ def upload_excel():
 
     # Salvataggio temporaneo
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-    file.save(filepath)
+    try:
+        file.save(filepath)
+    except Exception as e:
+        return jsonify({'error': f'Errore nel salvataggio del file: {e}'}), 400
 
     try:
         wb = openpyxl.load_workbook(filepath, read_only=True)
@@ -848,11 +905,12 @@ def upload_excel():
         wb.close()
         os.remove(filepath)
     except Exception as e:
+        os.remove(filepath)
         return jsonify({'error': f'Errore lettura Excel: {str(e)}'}), 400
 
     return jsonify({'user_list': '\n'.join(usernames)})
 
 
 if __name__ == '__main__':
+    # Esegui Flask su host 0.0.0.0 per accettare connessioni esterne
     app.run(host="0.0.0.0", port=5050, debug=True, threaded=False, use_reloader=False)
-
