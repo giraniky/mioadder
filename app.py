@@ -169,13 +169,15 @@ def count_available_phones(phones):
 
 def suspend_until_enough_phones(min_phones, phones, username):
     global ADD_SESSION
-    if ADD_SESSION.get('running', False):
-        log_msg = f"Nessun phone disponibile per {username}, sospendo finché non tornano almeno {min_phones} numeri disponibili."
-        log(log_msg)
+    with LOCK:
+        if ADD_SESSION.get('running', False):
+            log_msg = f"Nessun phone disponibile per {username}, sospendo finché non tornano almeno {min_phones} numeri disponibili."
+            log(log_msg)
 
     while True:
-        if not ADD_SESSION.get('running', False):
-            return
+        with LOCK:
+            if not ADD_SESSION.get('running', False):
+                return
         current_avail = count_available_phones(phones)
         if current_avail >= min_phones:
             resume_msg = f"Sono nuovamente disponibili {current_avail} numeri: riprendo l'aggiunta di {username}."
@@ -300,32 +302,34 @@ def api_add_phone():
     if not phone or not api_id or not api_hash:
         return jsonify({'error': 'Tutti i campi sono richiesti.'}), 400
 
-    phones = load_phones()
-    for p in phones:
-        if p['phone'] == phone:
-            return jsonify({'error': 'Phone already exists'}), 400
+    with LOCK:
+        phones = load_phones()
+        for p in phones:
+            if p['phone'] == phone:
+                return jsonify({'error': 'Phone already exists'}), 400
 
-    new_phone_entry = {
-        'phone': phone,
-        'api_id': api_id,
-        'api_hash': api_hash,
-        'paused': False,
-        'paused_until': None,
-        'added_today': 0,
-        'last_reset_date': datetime.date.today().isoformat(),
-        'total_added': 0,
-        'non_result_errors': 0
-    }
-    phones.append(new_phone_entry)
-    save_phones(phones)
+        new_phone_entry = {
+            'phone': phone,
+            'api_id': api_id,
+            'api_hash': api_hash,
+            'paused': False,
+            'paused_until': None,
+            'added_today': 0,
+            'last_reset_date': datetime.date.today().isoformat(),
+            'total_added': 0,
+            'non_result_errors': 0
+        }
+        phones.append(new_phone_entry)
+        save_phones(phones)
     return jsonify({'success': True})
 
 
 @app.route('/api/phones/<phone>', methods=['DELETE'])
 def api_remove_phone(phone):
-    phones = load_phones()
-    phones = [p for p in phones if p['phone'] != phone]
-    save_phones(phones)
+    with LOCK:
+        phones = load_phones()
+        phones = [p for p in phones if p['phone'] != phone]
+        save_phones(phones)
     return jsonify({'success': True})
 
 
@@ -333,14 +337,15 @@ def api_remove_phone(phone):
 def api_pause_phone(phone):
     data = request.json
     pause_state = data.get('paused', True)
-    phones = load_phones()
-    for p in phones:
-        if p['phone'] == phone:
-            p['paused'] = pause_state
-            if not pause_state:
-                p['paused_until'] = None
-            save_phones(phones)
-            return jsonify({'success': True})
+    with LOCK:
+        phones = load_phones()
+        for p in phones:
+            if p['phone'] == phone:
+                p['paused'] = pause_state
+                if not pause_state:
+                    p['paused_until'] = None
+                save_phones(phones)
+                return jsonify({'success': True})
     return jsonify({'error': 'Phone not found'}), 404
 
 
@@ -353,12 +358,13 @@ def api_send_code():
     if not phone:
         return jsonify({'error': 'Il campo phone è richiesto.'}), 400
 
-    phones = load_phones()
-    phone_entry = None
-    for p in phones:
-        if p['phone'] == phone:
-            phone_entry = p
-            break
+    with LOCK:
+        phones = load_phones()
+        phone_entry = None
+        for p in phones:
+            if p['phone'] == phone:
+                phone_entry = p
+                break
     if not phone_entry:
         return jsonify({'error': 'Phone not found'}), 404
 
@@ -366,10 +372,11 @@ def api_send_code():
     try:
         client.connect()
         sent = client.send_code_request(phone, force_sms=True)
-        OTP_DICT[phone] = {
-            'phone_code_hash': sent.phone_code_hash,
-            '2fa_needed': False
-        }
+        with LOCK:
+            OTP_DICT[phone] = {
+                'phone_code_hash': sent.phone_code_hash,
+                '2fa_needed': False
+            }
         return jsonify({'success': True})
     except errors.PhoneNumberBannedError:
         return jsonify({'error': 'This phone number is banned by Telegram.'}), 400
@@ -388,31 +395,34 @@ def api_validate_code():
     if not phone or not code:
         return jsonify({'error': 'I campi phone e code sono richiesti.'}), 400
 
-    if phone not in OTP_DICT:
-        return jsonify({'error': 'No OTP session found for this phone'}), 400
+    with LOCK:
+        if phone not in OTP_DICT:
+            return jsonify({'error': 'No OTP session found for this phone'}), 400
+        phone_code_hash = OTP_DICT[phone].get('phone_code_hash')
+        if not phone_code_hash:
+            return jsonify({'error': 'No phone_code_hash found for this phone'}), 400
 
-    phones = load_phones()
-    phone_entry = None
-    for p in phones:
-        if p['phone'] == phone:
-            phone_entry = p
-            break
+    with LOCK:
+        phones = load_phones()
+        phone_entry = None
+        for p in phones:
+            if p['phone'] == phone:
+                phone_entry = p
+                break
     if not phone_entry:
         return jsonify({'error': 'Phone not found'}), 404
-
-    phone_code_hash = OTP_DICT[phone].get('phone_code_hash')
-    if not phone_code_hash:
-        return jsonify({'error': 'No phone_code_hash found for this phone'}), 400
 
     client = create_telegram_client(phone_entry)
     try:
         client.connect()
         client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
-        del OTP_DICT[phone]
+        with LOCK:
+            del OTP_DICT[phone]
         return jsonify({'success': True})
     except errors.SessionPasswordNeededError:
-        OTP_DICT[phone]['2fa_needed'] = True
-        save_add_session()
+        with LOCK:
+            OTP_DICT[phone]['2fa_needed'] = True
+            save_add_session()
         return jsonify({'error': 'SESSION_PASSWORD_NEEDED'}), 400
     except errors.PhoneCodeInvalidError:
         return jsonify({'error': 'Invalid code provided.'}), 400
@@ -435,17 +445,18 @@ def api_validate_password():
     if not phone or not password:
         return jsonify({'error': 'I campi phone e password sono richiesti.'}), 400
 
-    if phone not in OTP_DICT:
-        return jsonify({'error': 'No OTP session found for this phone'}), 400
-    if not OTP_DICT[phone].get('2fa_needed'):
-        return jsonify({'error': '2FA was not requested for this phone'}), 400
+    with LOCK:
+        if phone not in OTP_DICT:
+            return jsonify({'error': 'No OTP session found for this phone'}), 400
+        if not OTP_DICT[phone].get('2fa_needed'):
+            return jsonify({'error': '2FA was not requested for this phone'}), 400
 
-    phones = load_phones()
-    phone_entry = None
-    for p in phones:
-        if p['phone'] == phone:
-            phone_entry = p
-            break
+        phones = load_phones()
+        phone_entry = None
+        for p in phones:
+            if p['phone'] == phone:
+                phone_entry = p
+                break
     if not phone_entry:
         return jsonify({'error': 'Phone not found'}), 404
 
@@ -453,7 +464,8 @@ def api_validate_password():
     try:
         client.connect()
         client.sign_in(password=password)
-        del OTP_DICT[phone]
+        with LOCK:
+            del OTP_DICT[phone]
         return jsonify({'success': True})
     except errors.PasswordHashInvalidError:
         return jsonify({'error': 'Invalid 2FA password provided.'}), 400
@@ -466,33 +478,35 @@ def api_validate_password():
 # SEZIONE 3: AGGIUNTA UTENTI AL GRUPPO
 def add_users_to_group_thread(group_username, users_list):
     global ADD_SESSION
-    ADD_SESSION['running'] = True
-    ADD_SESSION['group'] = group_username
-    ADD_SESSION['total_added'] = 0
-    ADD_SESSION['log'] = []
-    ADD_SESSION['start_time'] = time.time()
+    with LOCK:
+        ADD_SESSION['running'] = True
+        ADD_SESSION['group'] = group_username
+        ADD_SESSION['total_added'] = 0
+        ADD_SESSION['log'] = []
+        ADD_SESSION['start_time'] = time.time()
 
-    if 'last_user_index' not in ADD_SESSION:
-        ADD_SESSION['last_user_index'] = 0
+        if 'last_user_index' not in ADD_SESSION:
+            ADD_SESSION['last_user_index'] = 0
 
-    ADD_SESSION['paused_due_to_limit'] = False
-    ADD_SESSION['paused_until'] = None
-    save_add_session()
+        ADD_SESSION['paused_due_to_limit'] = False
+        ADD_SESSION['paused_until'] = None
+        save_add_session()
 
     # Parametri
-    min_phones_available = ADD_SESSION.get('min_phones_available', 1)
-    max_non_result_errors = ADD_SESSION.get('max_non_result_errors', 3)
-    days_pause_non_result_errors = ADD_SESSION.get('days_pause_non_result_errors', 2)
-    sleep_seconds = ADD_SESSION.get('sleep_seconds', 10)
+    with LOCK:
+        min_phones_available = ADD_SESSION.get('min_phones_available', 1)
+        max_non_result_errors = ADD_SESSION.get('max_non_result_errors', 3)
+        days_pause_non_result_errors = ADD_SESSION.get('days_pause_non_result_errors', 2)
+        sleep_seconds = ADD_SESSION.get('sleep_seconds', 10)
 
-    # Nuovi parametri di skip
-    skip_config = {
-        'last_seen_gt_1_day': ADD_SESSION.get('last_seen_gt_1_day', False),
-        'last_seen_gt_7_days': ADD_SESSION.get('last_seen_gt_7_days', False),
-        'last_seen_gt_30_days': ADD_SESSION.get('last_seen_gt_30_days', False),
-        'last_seen_gt_60_days': ADD_SESSION.get('last_seen_gt_60_days', False),
-        'user_status_empty': ADD_SESSION.get('user_status_empty', False)
-    }
+        # Nuovi parametri di skip
+        skip_config = {
+            'last_seen_gt_1_day': ADD_SESSION.get('last_seen_gt_1_day', False),
+            'last_seen_gt_7_days': ADD_SESSION.get('last_seen_gt_7_days', False),
+            'last_seen_gt_30_days': ADD_SESSION.get('last_seen_gt_30_days', False),
+            'last_seen_gt_60_days': ADD_SESSION.get('last_seen_gt_60_days', False),
+            'user_status_empty': ADD_SESSION.get('user_status_empty', False)
+        }
 
     # Creiamo un nuovo event loop per questo thread
     loop = asyncio.new_event_loop()
@@ -504,9 +518,10 @@ def add_users_to_group_thread(group_username, users_list):
         log(f"Errore nell'operazione di aggiunta: {e}")
     finally:
         loop.close()
-        ADD_SESSION['running'] = False
-        log("Operazione di aggiunta terminata.")
-        save_add_session()
+        with LOCK:
+            ADD_SESSION['running'] = False
+            log("Operazione di aggiunta terminata.")
+            save_add_session()
 
 
 async def run_add_users(group_username, users_list, skip_config):
@@ -538,8 +553,9 @@ async def run_add_users(group_username, users_list, skip_config):
 
     if not phone_clients:
         log("Nessun numero disponibile con sessione valida. Interruzione.")
-        ADD_SESSION['running'] = False
-        save_add_session()
+        with LOCK:
+            ADD_SESSION['running'] = False
+            save_add_session()
         return
 
     # Recupero entità gruppo
@@ -571,10 +587,11 @@ async def run_add_users(group_username, users_list, skip_config):
 
     if not group_entities:
         log("Nessun client può accedere al gruppo. Interruzione.")
-        ADD_SESSION['running'] = False
+        with LOCK:
+            ADD_SESSION['running'] = False
+            save_add_session()
         for c in phone_clients.values():
             await c.disconnect()
-        save_add_session()
         return
 
     # Aggiunta di un controllo: assicurarsi che ogni phone sia già nel gruppo
@@ -607,22 +624,27 @@ async def run_add_users(group_username, users_list, skip_config):
 
     if not phone_clients:
         log("Nessun client disponibile dopo il controllo di partecipazione al gruppo. Interruzione.")
-        ADD_SESSION['running'] = False
-        save_add_session()
+        with LOCK:
+            ADD_SESSION['running'] = False
+            save_add_session()
         return
 
     phone_list = sorted(list(phone_clients.keys()))
     phone_index = 0
 
-    i = ADD_SESSION.get('last_user_index', 0)
+    with LOCK:
+        i = ADD_SESSION.get('last_user_index', 0)
+
     while i < len(users_list):
-        if not ADD_SESSION.get('running', False):
-            break
+        with LOCK:
+            if not ADD_SESSION.get('running', False):
+                break
         username = users_list[i].strip()
         if not username:
-            i += 1
-            ADD_SESSION['last_user_index'] = i
-            save_add_session()
+            with LOCK:
+                i += 1
+                ADD_SESSION['last_user_index'] = i
+                save_add_session()
             continue
 
         # Cerca un phone disponibile
@@ -636,13 +658,14 @@ async def run_add_users(group_username, users_list, skip_config):
             if cur_phone not in phone_clients:
                 continue
 
-            current_phones = load_phones()
-            p_entry = None
-            for px in current_phones:
-                if px['phone'] == cur_phone:
-                    p_entry = px
-                    reset_daily_counters_if_needed(px)
-                    break
+            with LOCK:
+                current_phones = load_phones()
+                p_entry = None
+                for px in current_phones:
+                    if px['phone'] == cur_phone:
+                        p_entry = px
+                        reset_daily_counters_if_needed(px)
+                        break
 
             if not p_entry:
                 continue
@@ -664,8 +687,9 @@ async def run_add_users(group_username, users_list, skip_config):
 
         if not selected_phone:
             suspend_until_enough_phones(min_phones_available, load_phones(), username)
-            if not ADD_SESSION.get('running', False):
-                break
+            with LOCK:
+                if not ADD_SESSION.get('running', False):
+                    break
             continue
 
         client = phone_clients[selected_phone]
@@ -676,9 +700,10 @@ async def run_add_users(group_username, users_list, skip_config):
             user_entity = await client.get_entity(username)
         except errors.UsernameNotOccupiedError:
             log(f"[{selected_phone}] {username}: l'username non esiste. Skipping.")
-            i += 1
-            ADD_SESSION['last_user_index'] = i
-            save_add_session()
+            with LOCK:
+                i += 1
+                ADD_SESSION['last_user_index'] = i
+                save_add_session()
             continue
         except Exception as ex:
             err_msg = str(ex)
@@ -691,34 +716,38 @@ async def run_add_users(group_username, users_list, skip_config):
                     log(f"[{selected_phone}] Pausa per {wait_seconds} secondi (FloodWait).")
                 except:
                     pass
-            i += 1
-            ADD_SESSION['last_user_index'] = i
-            save_add_session()
+            with LOCK:
+                i += 1
+                ADD_SESSION['last_user_index'] = i
+                save_add_session()
             continue
 
         # --- NUOVO CONTROLLO: skip in base a last_seen ---
         if should_skip_user_by_last_seen(user_entity, skip_config):
             log(f"[{selected_phone}] {username}: skip per impostazioni ultimo accesso (status={user_entity.status}).")
-            i += 1
-            ADD_SESSION['last_user_index'] = i
-            save_add_session()
+            with LOCK:
+                i += 1
+                ADD_SESSION['last_user_index'] = i
+                save_add_session()
             continue
 
         # Verifichiamo se è già nel gruppo
         try:
             await client(GetParticipantRequest(group_entity, user_entity))
             log(f"[{selected_phone}] {username}: già nel gruppo. Skipping.")
-            i += 1
-            ADD_SESSION['last_user_index'] = i
-            save_add_session()
+            with LOCK:
+                i += 1
+                ADD_SESSION['last_user_index'] = i
+                save_add_session()
             continue
         except rpcerrorlist.UserNotParticipantError:
             pass
         except Exception as e:
             log(f"[{selected_phone}] Errore controllando partecipazione di {username}: {e}. Skipping.")
-            i += 1
-            ADD_SESSION['last_user_index'] = i
-            save_add_session()
+            with LOCK:
+                i += 1
+                ADD_SESSION['last_user_index'] = i
+                save_add_session()
             continue
 
         # Tentiamo l'aggiunta
@@ -726,7 +755,8 @@ async def run_add_users(group_username, users_list, skip_config):
             await client(InviteToChannelRequest(group_entity, [user_entity]))
             # Se non c'è eccezione, consideriamo aggiunto
             update_phone_stats(selected_phone, added=1, total=1)
-            ADD_SESSION['total_added'] += 1
+            with LOCK:
+                ADD_SESSION['total_added'] += 1
             log(f"[{selected_phone}] Aggiunto con successo -> {username}")
 
             # Verifica se risulta nel gruppo
@@ -774,54 +804,68 @@ async def run_add_users(group_username, users_list, skip_config):
                 except:
                     pass
 
-        i += 1
-        ADD_SESSION['last_user_index'] = i
-        save_add_session()
+        with LOCK:
+            i += 1
+            ADD_SESSION['last_user_index'] = i
+            save_add_session()
 
     # After loop, reset last_user_index if done
-    if i >= len(users_list):
-        ADD_SESSION['last_user_index'] = 0
-        log("Lista utenti terminata. last_user_index riportato a 0.")
+    with LOCK:
+        if i >= len(users_list):
+            ADD_SESSION['last_user_index'] = 0
+            log("Lista utenti terminata. last_user_index riportato a 0.")
 
 
 @app.route('/api/start_adding', methods=['POST'])
 def api_start_adding():
     global ADD_SESSION
-    if ADD_SESSION.get('running', False):
-        return jsonify({'error': "Un'operazione di aggiunta è già in corso."}), 400
+    with LOCK:
+        if ADD_SESSION.get('running', False):
+            return jsonify({'error': "Un'operazione di aggiunta è già in corso."}), 400
 
     data = request.json
     group_username = data.get('group_username', '').strip()
     user_list_raw = data.get('user_list', '').strip()
     users_list = [u.strip() for u in user_list_raw.splitlines() if u.strip()]
 
-    ADD_SESSION['min_phones_available'] = data.get('min_phones_available', 1)
-    ADD_SESSION['max_non_result_errors'] = data.get('max_non_result_errors', 3)
-    ADD_SESSION['days_pause_non_result_errors'] = data.get('days_pause_non_result_errors', 2)
-    ADD_SESSION['sleep_seconds'] = data.get('sleep_seconds', 10)
+    min_phones_available = data.get('min_phones_available', 1)
+    max_non_result_errors = data.get('max_non_result_errors', 3)
+    days_pause_non_result_errors = data.get('days_pause_non_result_errors', 2)
+    sleep_seconds = data.get('sleep_seconds', 10)
 
     # Nuovi parametri di skip
     skip_options = data.get('skip_options', [])
-    ADD_SESSION['last_seen_gt_1_day'] = 'last_seen_gt_1_day' in skip_options
-    ADD_SESSION['last_seen_gt_7_days'] = 'last_seen_gt_7_days' in skip_options
-    ADD_SESSION['last_seen_gt_30_days'] = 'last_seen_gt_30_days' in skip_options
-    ADD_SESSION['last_seen_gt_60_days'] = 'last_seen_gt_60_days' in skip_options
-    ADD_SESSION['user_status_empty'] = 'user_status_empty' in skip_options
+    last_seen_gt_1_day = 'last_seen_gt_1_day' in skip_options
+    last_seen_gt_7_days = 'last_seen_gt_7_days' in skip_options
+    last_seen_gt_30_days = 'last_seen_gt_30_days' in skip_options
+    last_seen_gt_60_days = 'last_seen_gt_60_days' in skip_options
+    user_status_empty = 'user_status_empty' in skip_options
 
     if not group_username or not users_list:
         return jsonify({'error': 'Dati insufficienti (gruppo o lista utenti vuota).'}), 400
 
     # Reset session
-    ADD_SESSION['running'] = True
-    ADD_SESSION['group'] = group_username
-    ADD_SESSION['total_added'] = 0
-    ADD_SESSION['log'] = []
-    ADD_SESSION['start_time'] = time.time()
+    with LOCK:
+        ADD_SESSION['running'] = True
+        ADD_SESSION['group'] = group_username
+        ADD_SESSION['total_added'] = 0
+        ADD_SESSION['log'] = []
+        ADD_SESSION['start_time'] = time.time()
+        ADD_SESSION['last_user_index'] = ADD_SESSION.get('last_user_index', 0)
+        ADD_SESSION['paused_due_to_limit'] = False
+        ADD_SESSION['paused_until'] = None
 
-    if 'last_user_index' not in ADD_SESSION:
-        ADD_SESSION['last_user_index'] = 0
-
-    save_add_session()
+        # Impostiamo i parametri
+        ADD_SESSION['min_phones_available'] = min_phones_available
+        ADD_SESSION['max_non_result_errors'] = max_non_result_errors
+        ADD_SESSION['days_pause_non_result_errors'] = days_pause_non_result_errors
+        ADD_SESSION['sleep_seconds'] = sleep_seconds
+        ADD_SESSION['last_seen_gt_1_day'] = last_seen_gt_1_day
+        ADD_SESSION['last_seen_gt_7_days'] = last_seen_gt_7_days
+        ADD_SESSION['last_seen_gt_30_days'] = last_seen_gt_30_days
+        ADD_SESSION['last_seen_gt_60_days'] = last_seen_gt_60_days
+        ADD_SESSION['user_status_empty'] = user_status_empty
+        save_add_session()
 
     # Avviare il thread di aggiunta
     t = threading.Thread(target=add_users_to_group_thread, args=(group_username, users_list))
@@ -832,31 +876,35 @@ def api_start_adding():
 
 @app.route('/api/log_status', methods=['GET'])
 def api_log_status():
-    return jsonify({
-        'running': ADD_SESSION.get('running', False),
-        'group': ADD_SESSION.get('group', ''),
-        'total_added': ADD_SESSION.get('total_added', 0),
-        'log': ADD_SESSION.get('log', []),
-    })
+    with LOCK:
+        return jsonify({
+            'running': ADD_SESSION.get('running', False),
+            'group': ADD_SESSION.get('group', ''),
+            'total_added': ADD_SESSION.get('total_added', 0),
+            'log': ADD_SESSION.get('log', []),
+        })
 
 
 @app.route('/api/stop_adding', methods=['POST'])
 def api_stop_adding():
     global ADD_SESSION
-    if ADD_SESSION.get('running', False):
-        ADD_SESSION['running'] = False
-        log_msg = "Operazione fermata manualmente dall'utente."
-        log(log_msg)
-        save_add_session()
-        return jsonify({"success": True, "message": "Operazione fermata con successo."})
-    else:
-        return jsonify({"success": False, "message": "Nessuna operazione in corso"}), 400
+    with LOCK:
+        if ADD_SESSION.get('running', False):
+            ADD_SESSION['running'] = False
+            log_msg = "Operazione fermata manualmente dall'utente."
+            ADD_SESSION['log'].append(log_msg)
+            save_add_session()
+            print(log_msg)
+            return jsonify({"success": True, "message": "Operazione fermata con successo."})
+        else:
+            return jsonify({"success": False, "message": "Nessuna operazione in corso"}), 400
 
 
 # SEZIONE 4: RIEPILOGO
 @app.route('/api/summary', methods=['GET'])
 def api_summary():
-    phones = load_phones()
+    with LOCK:
+        phones = load_phones()
     now = datetime.datetime.now()
     summary_list = []
     for p in phones:
@@ -873,7 +921,8 @@ def api_summary():
             'total_added': p['total_added']
         })
 
-    session_total = ADD_SESSION.get('total_added', 0)
+    with LOCK:
+        session_total = ADD_SESSION.get('total_added', 0)
     return jsonify({
         'session_added_total': session_total,
         'phones': summary_list
