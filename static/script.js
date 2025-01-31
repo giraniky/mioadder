@@ -1,5 +1,6 @@
 // -------------------------------------------------------
-// Mostra la sezione selezionata
+// Navigazione fra le sezioni
+// -------------------------------------------------------
 function showSection(id) {
   document.querySelectorAll('section').forEach(section => section.classList.remove('active'));
   document.getElementById(id).classList.add('active');
@@ -15,29 +16,23 @@ async function loadPhones() {
     let tbody = document.querySelector('#phones-table tbody');
     tbody.innerHTML = '';
 
-    phones.forEach(phoneObj => {
+    phones.forEach(p => {
+      let pausedText = p.paused ? 'Yes' : 'No';
+      let floodTimeFormatted = p.flood_time > 0 ? formatSeconds(p.flood_time) : '0';
+
       let row = document.createElement('tr');
-      let pausedText = phoneObj.paused ? 'Yes' : 'No';
-      let addedToday = phoneObj.added_today || 0;
-      let totalAdded = phoneObj.total_added || 0;
-
-      let floodTimeFormatted = '0';
-      if (typeof phoneObj.flood_time !== 'undefined' && phoneObj.flood_time > 0) {
-        floodTimeFormatted = formatSeconds(phoneObj.flood_time);
-      }
-
       row.innerHTML = `
-        <td>${phoneObj.phone}</td>
-        <td>${phoneObj.api_id}</td>
+        <td>${p.phone}</td>
+        <td>${p.api_id}</td>
         <td>${pausedText}</td>
         <td>${floodTimeFormatted}</td>
-        <td>${addedToday}</td>
-        <td>${totalAdded}</td>
+        <td>${p.added_today}</td>
+        <td>${p.total_added}</td>
         <td>
-          <button onclick="pausePhone('${phoneObj.phone}', ${!phoneObj.paused})">
-            ${phoneObj.paused ? 'Unpause' : 'Pause'}
+          <button onclick="pausePhone('${p.phone}', ${!p.paused})">
+            ${p.paused ? 'Unpause' : 'Pause'}
           </button>
-          <button onclick="removePhone('${phoneObj.phone}')">Remove</button>
+          <button onclick="removePhone('${p.phone}')">Remove</button>
         </td>
       `;
       tbody.appendChild(row);
@@ -67,33 +62,31 @@ async function addPhone() {
     if (data.error) {
       alert('Errore: ' + data.error);
     } else {
-      alert('Numero salvato correttamente!');
+      alert('Numero inserito correttamente!');
       document.getElementById('phone').value = '';
       document.getElementById('api_id').value = '';
       document.getElementById('api_hash').value = '';
       loadPhones();
     }
   } catch (err) {
-    console.error('Errore salvando phone:', err);
-    alert('Errore nel salvataggio del numero');
+    console.error('Errore addPhone:', err);
   }
 }
 
 async function removePhone(phone) {
-  if (!confirm(`Sei sicuro di voler rimuovere ${phone}?`)) return;
+  if (!confirm(`Rimuovere il numero ${phone}?`)) return;
   try {
     let res = await fetch(`/api/phones/${encodeURIComponent(phone)}`, {
       method: 'DELETE'
     });
     let data = await res.json();
     if (data.success) {
-      alert('Numero rimosso correttamente!');
       loadPhones();
     } else {
       alert('Errore nella rimozione del numero');
     }
   } catch (err) {
-    console.error('Errore rimuovendo phone:', err);
+    console.error('Errore removePhone:', err);
   }
 }
 
@@ -108,10 +101,10 @@ async function pausePhone(phone, pauseState) {
     if (data.success) {
       loadPhones();
     } else {
-      alert('Errore nel cambio di stato del numero');
+      alert('Errore nel cambio di stato');
     }
   } catch (err) {
-    console.error('Errore pausing/unpausing phone:', err);
+    console.error('Errore pausePhone:', err);
   }
 }
 
@@ -121,10 +114,9 @@ async function pausePhone(phone, pauseState) {
 async function sendCode() {
   let phone = document.getElementById('phone-login').value.trim();
   if (!phone) {
-    alert('Inserisci un numero');
+    alert('Inserisci il numero');
     return;
   }
-
   let logDiv = document.getElementById('login-log');
   logDiv.innerHTML += `<p>Invio codice a ${phone}...</p>`;
 
@@ -136,13 +128,12 @@ async function sendCode() {
     });
     let data = await res.json();
     if (data.success) {
-      logDiv.innerHTML += `<p>Codice inviato con successo a ${phone}. Inseriscilo.</p>`;
+      logDiv.innerHTML += `<p>Codice inviato. Inseriscilo nel box OTP.</p>`;
       document.getElementById('otp-section').style.display = 'block';
     } else {
       logDiv.innerHTML += `<p>Errore: ${data.error}</p>`;
     }
   } catch (err) {
-    console.error('Errore sendCode:', err);
     logDiv.innerHTML += `<p>Eccezione: ${err}</p>`;
   }
 }
@@ -151,7 +142,6 @@ async function validateCode() {
   let phone = document.getElementById('phone-login').value.trim();
   let code = document.getElementById('otp-code').value.trim();
   let logDiv = document.getElementById('login-log');
-
   logDiv.innerHTML += `<p>Verifico codice per ${phone}...</p>`;
 
   try {
@@ -165,16 +155,13 @@ async function validateCode() {
       logDiv.innerHTML += `<p>Login completato per ${phone}!</p>`;
       document.getElementById('otp-section').style.display = 'none';
       document.getElementById('otp-code').value = '';
+    } else if (data.error === 'SESSION_PASSWORD_NEEDED') {
+      logDiv.innerHTML += `<p>2FA attiva. Inserisci la password 2FA.</p>`;
+      document.getElementById('password-section').style.display = 'block';
     } else {
-      if (data.error === 'SESSION_PASSWORD_NEEDED') {
-        logDiv.innerHTML += `<p>Questo account ha la 2FA. Inserisci la password.</p>`;
-        document.getElementById('password-section').style.display = 'block';
-      } else {
-        logDiv.innerHTML += `<p>Errore: ${data.error}</p>`;
-      }
+      logDiv.innerHTML += `<p>Errore: ${data.error}</p>`;
     }
   } catch (err) {
-    console.error('Errore validateCode:', err);
     logDiv.innerHTML += `<p>Eccezione: ${err}</p>`;
   }
 }
@@ -192,14 +179,13 @@ async function validatePassword() {
     });
     let data = await res.json();
     if (data.success) {
-      logDiv.innerHTML += `<p>Login completato con password 2FA per ${phone}!</p>`;
+      logDiv.innerHTML += `<p>Login completato (2FA) per ${phone}!</p>`;
       document.getElementById('password-section').style.display = 'none';
       document.getElementById('twofa-password').value = '';
     } else {
       logDiv.innerHTML += `<p>Errore: ${data.error}</p>`;
     }
   } catch (err) {
-    console.error('Errore validatePassword:', err);
     logDiv.innerHTML += `<p>Eccezione: ${err}</p>`;
   }
 }
@@ -210,12 +196,10 @@ async function validatePassword() {
 async function uploadExcelFile() {
   let fileInput = document.getElementById('excel_file');
   if (!fileInput.files || fileInput.files.length === 0) {
-    alert('Seleziona un file Excel prima di cliccare "Carica Excel"');
+    alert('Nessun file Excel selezionato');
     return;
   }
-
   let file = fileInput.files[0];
-  console.log('Carico il file Excel:', file.name);
 
   let formData = new FormData();
   formData.append('excel_file', file);
@@ -227,46 +211,38 @@ async function uploadExcelFile() {
     });
     let data = await res.json();
     if (data.error) {
-      console.error('Errore upload_excel:', data.error);
-      alert('Errore caricamento Excel: ' + data.error);
+      alert('Errore: ' + data.error);
     } else {
-      let user_list = data.user_list;
       let ta = document.getElementById('user_list');
       if (ta.value.trim()) {
-        ta.value += '\n' + user_list;
+        ta.value += '\n' + data.user_list;
       } else {
-        ta.value = user_list;
+        ta.value = data.user_list;
       }
-      alert('Lista utenti caricata dall\'Excel!');
+      alert('Caricata la lista utenti dall’Excel!');
     }
   } catch (err) {
-    console.error('Errore caricando il file Excel:', err);
-    alert('Errore caricando il file Excel.');
+    console.error('Errore uploadExcelFile:', err);
   }
 }
 
 // -------------------------------------------------------
-// ADD USERS
+// AGGIUNTA UTENTI
 // -------------------------------------------------------
 async function startAdding() {
   let group_username = document.getElementById('group_username').value.trim();
-  let user_list = document.getElementById('user_list').value;
-  let addLogDiv = document.getElementById('add-log');
+  let user_list = document.getElementById('user_list').value.trim();
 
   let min_phones_available = parseInt(document.getElementById('min_phones_available').value) || 1;
   let max_non_result_errors = parseInt(document.getElementById('max_non_result_errors').value) || 3;
   let days_pause_non_result_errors = parseInt(document.getElementById('days_pause_non_result_errors').value) || 2;
   let sleep_seconds = parseInt(document.getElementById('sleep_seconds').value) || 10;
 
-  let skipOptionsSelect = document.getElementById('skip_options');
-  let selectedOptions = Array.from(skipOptionsSelect.selectedOptions).map(option => option.value);
+  let skipSelect = document.getElementById('skip_options');
+  let selected = Array.from(skipSelect.selectedOptions).map(opt => opt.value);
 
-  if (!group_username || !user_list) {
-    alert('Compila il campo gruppo e la lista utenti.');
-    return;
-  }
-
-  addLogDiv.innerHTML += `<p>Inizio procedura di aggiunta al gruppo ${group_username}...</p>`;
+  let addLog = document.getElementById('add-log');
+  addLog.innerHTML += `<p>Inizio aggiunta al gruppo ${group_username}...</p>`;
 
   try {
     let res = await fetch('/api/start_adding', {
@@ -279,27 +255,24 @@ async function startAdding() {
         max_non_result_errors,
         days_pause_non_result_errors,
         sleep_seconds,
-        skip_options: selectedOptions
+        skip_options: selected
       })
     });
     let data = await res.json();
     if (data.success) {
-      addLogDiv.innerHTML += `<p>Thread di aggiunta avviato.</p>`;
+      addLog.innerHTML += `<p>Thread di aggiunta avviato correttamente.</p>`;
       pollAddLog();
     } else {
-      addLogDiv.innerHTML += `<p>Errore: ${data.error}</p>`;
+      addLog.innerHTML += `<p>Errore: ${data.error}</p>`;
     }
   } catch (err) {
-    console.error('Errore startAdding:', err);
-    addLogDiv.innerHTML += `<p>Eccezione: ${err}</p>`;
+    addLog.innerHTML += `<p>Eccezione: ${err}</p>`;
   }
 }
 
 async function stopAdding() {
   try {
-    let res = await fetch('/api/stop_adding', {
-      method: 'POST'
-    });
+    let res = await fetch('/api/stop_adding', { method: 'POST' });
     let data = await res.json();
     if (data.success) {
       alert(data.message);
@@ -308,29 +281,26 @@ async function stopAdding() {
     }
   } catch (err) {
     console.error('Errore stopAdding:', err);
-    alert("Errore fermando l'operazione.");
   }
 }
 
-let pollingInterval = null;
+let pollInterval = null;
 
 function pollAddLog() {
-  if (pollingInterval) {
-    clearInterval(pollingInterval);
-  }
-  pollingInterval = setInterval(async () => {
+  if (pollInterval) clearInterval(pollInterval);
+  pollInterval = setInterval(async () => {
     try {
       let res = await fetch('/api/log_status');
       let data = await res.json();
-      let addLogDiv = document.getElementById('add-log');
-      addLogDiv.innerHTML = '';
+      let addLog = document.getElementById('add-log');
+      addLog.innerHTML = '';
       data.log.forEach(line => {
-        addLogDiv.innerHTML += `<p>${line}</p>`;
+        addLog.innerHTML += `<p>${line}</p>`;
       });
       if (!data.running) {
-        clearInterval(pollingInterval);
-        pollingInterval = null;
-        addLogDiv.innerHTML += `<p>Operazione terminata. Totale aggiunti: ${data.total_added}</p>`;
+        clearInterval(pollInterval);
+        pollInterval = null;
+        addLog.innerHTML += `<p>Operazione terminata. Totale aggiunti: ${data.total_added}</p>`;
         loadPhones();
         loadSummary();
       }
@@ -341,70 +311,64 @@ function pollAddLog() {
 }
 
 // -------------------------------------------------------
-// SUMMARY
+// RIEPILOGO
 // -------------------------------------------------------
 async function loadSummary() {
   try {
     let res = await fetch('/api/summary');
     let data = await res.json();
-    let summaryTable = document.querySelector('#summary-table tbody');
-    summaryTable.innerHTML = '';
-
     document.getElementById('session-added-info').innerText =
-      `In questa sessione sono stati aggiunti in totale: ${data.session_added_total} utenti.`;
+      `In questa sessione aggiunti: ${data.session_added_total} utenti.`;
+
+    let tbody = document.querySelector('#summary-table tbody');
+    tbody.innerHTML = '';
 
     data.phones.forEach(p => {
-      let row = document.createElement('tr');
       let pausedText = p.paused ? 'Yes' : 'No';
-      let addedToday = p.added_today || 0;
-      let totalAdded = p.total_added || 0;
-
-      let floodTimeFormatted = '0';
-      if (p.flood_time > 0) {
-        floodTimeFormatted = formatSeconds(p.flood_time);
-      }
-
+      let floodTimeFormatted = p.flood_time > 0 ? formatSeconds(p.flood_time) : '0';
+      let row = document.createElement('tr');
       row.innerHTML = `
         <td>${p.phone}</td>
-        <td>${addedToday}</td>
-        <td>${totalAdded}</td>
+        <td>${p.added_today}</td>
+        <td>${p.total_added}</td>
         <td>${pausedText}</td>
         <td>${floodTimeFormatted}</td>
       `;
-      summaryTable.appendChild(row);
+      tbody.appendChild(row);
     });
   } catch (err) {
     console.error('Errore loadSummary:', err);
   }
 }
 
-function formatSeconds(seconds) {
-  let hrs = Math.floor(seconds / 3600);
-  let mins = Math.floor((seconds % 3600) / 60);
-  let secs = seconds % 60;
-  return `${pad(hrs)}:${pad(mins)}:${pad(secs)}`;
+// -------------------------------------------------------
+// FORMATTING UTILS
+// -------------------------------------------------------
+function formatSeconds(sec) {
+  let h = Math.floor(sec / 3600);
+  let m = Math.floor((sec % 3600) / 60);
+  let s = sec % 60;
+  return `${pad(h)}:${pad(m)}:${pad(s)}`;
 }
-
-function pad(num) {
-  return num.toString().padStart(2, '0');
+function pad(n) {
+  return n.toString().padStart(2, '0');
 }
 
 // -------------------------------------------------------
 // RIAVVIO TMUX
 // -------------------------------------------------------
 async function restartTmux() {
-  if (!confirm("Sei sicuro di voler riavviare la sessione TMUX?")) return;
+  if (!confirm('Sei sicuro di voler riavviare la sessione tmux "mioadder"?')) return;
   try {
     let res = await fetch('/api/restart_tmux', { method: 'POST' });
     let data = await res.json();
     if (data.success) {
-      alert(data.message || "Sessione TMUX riavviata con successo!");
+      alert(data.message);
     } else {
-      alert("Errore nel riavviare TMUX: " + data.message);
+      alert('Errore nel riavvio TMUX: ' + data.message);
     }
   } catch (err) {
-    console.error('Errore restartTmux:', err);
-    alert("Errore nel riavviare la sessione TMUX.");
+    alert('Eccezione riavviando TMUX: ' + err);
   }
 }
 
@@ -414,6 +378,7 @@ window.addEventListener('DOMContentLoaded', () => {
   loadPhones();
   loadSummary();
 
+  // Se c'è un'operazione in corso, continuiamo a fare polling
   (async () => {
     try {
       let res = await fetch('/api/log_status');
@@ -422,7 +387,7 @@ window.addEventListener('DOMContentLoaded', () => {
         pollAddLog();
       }
     } catch (err) {
-      console.error('Errore checking log_status:', err);
+      console.error('Errore /api/log_status:', err);
     }
   })();
 });
