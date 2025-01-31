@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <title>Gestione Gruppo Telegram</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <style>
+    /* Stili base per il dropdown multi-selezione */
+    .dropdown {
+      position: relative;
+      display: inline-block;
+      width: 100%;
+    }
+
+    .dropdown select {
+      width: 100%;
+      padding: 8px;
+      box-sizing: border-box;
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <nav>
+    <button onclick="showSection('manage-numbers')">Gestione Numeri</button>
+    <button onclick="showSection('log-in')">Log In</button>
+    <button onclick="showSection('add-users')">Aggiungi Utenti</button>
+    <button onclick="showSection('summary')">Riepilogo</button>
+  </nav>
+
+  <!-- SEZIONE Gestione Numeri -->
+  <section id="manage-numbers" class="active">
+    <h2>Gestione Numeri</h2>
+    <div class="form-container">
+      <label for="phone">Numero di Telefono:</label>
+      <input type="text" id="phone" placeholder="+1234567890" />
+      <label for="api_id">API ID:</label>
+      <input type="text" id="api_id" placeholder="Il tuo API ID" />
+      <label for="api_hash">API Hash:</label>
+      <input type="text" id="api_hash" placeholder="Il tuo API Hash" />
+      <button onclick="addPhone()">Aggiungi Numero</button>
+    </div>
+
+    <table id="phones-table">
+      <thead>
+        <tr>
+          <th>Telefono</th>
+          <th>API ID</th>
+          <th>In Pausa</th>
+          <th>Flood Time</th>
+          <th>Aggiunti Oggi</th>
+          <th>Totale Aggiunti</th>
+          <th>Azioni</th>
+        </tr>
+      </thead>
+      <tbody>
+        <!-- Le voci dei numeri verranno caricate qui -->
+      </tbody>
+    </table>
+  </section>
+
+  <!-- SEZIONE Log In -->
+  <section id="log-in">
+    <h2>Log In con OTP</h2>
+    <div class="form-container">
+      <label for="phone-login">Numero di Telefono:</label>
+      <input type="text" id="phone-login" placeholder="+1234567890" />
+      <button onclick="sendCode()">Invia Codice</button>
+    </div>
+
+    <div id="login-log" class="log-container">
+      <h3>Log di Login</h3>
+      <!-- I messaggi di log appariranno qui -->
+    </div>
+
+    <div id="otp-section" style="display: none;">
+      <div class="form-container">
+        <label for="otp-code">Codice OTP:</label>
+        <input type="text" id="otp-code" placeholder="Inserisci OTP" />
+        <button onclick="validateCode()">Valida Codice</button>
+      </div>
+    </div>
+
+    <div id="password-section" style="display: none;">
+      <div class="form-container">
+        <label for="twofa-password">Password 2FA:</label>
+        <input type="password" id="twofa-password" placeholder="Inserisci Password 2FA" />
+        <button onclick="validatePassword()">Valida Password</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- SEZIONE Aggiungi Utenti -->
+  <section id="add-users">
+    <h2>Aggiungi Utenti a un Gruppo</h2>
+    <div class="form-container">
+
+      <label for="group_username">Username del Gruppo (es: @nomegruppo):</label>
+      <input type="text" id="group_username" placeholder="@nomegruppo" />
+      
+      <label for="user_list">Lista Utenti (uno per riga):</label>
+      <textarea id="user_list" rows="8" placeholder="@user1\n@user2\n@user3"></textarea>
+
+      <!-- Caricamento da file Excel -->
+      <label for="excel_file">Oppure carica un file Excel (prima colonna = username):</label>
+      <input type="file" id="excel_file" accept=".xlsx,.xlsm,.xltx,.xltm" />
+      <button onclick="uploadExcelFile()">Carica Excel</button>
+      <hr/>
+
+      <label for="min_phones_available">Minimo numeri disponibili prima di riprendere:</label>
+      <input type="number" id="min_phones_available" value="1" />
+
+      <label for="max_non_result_errors">Numero massimo di errori "non risulta nel gruppo":</label>
+      <input type="number" id="max_non_result_errors" value="3" />
+
+      <label for="days_pause_non_result_errors">Giorni di sospensione dopo troppi errori:</label>
+      <input type="number" id="days_pause_non_result_errors" value="2" />
+
+      <label for="sleep_seconds">Secondi di attesa fra un invito e l'altro:</label>
+      <input type="number" id="sleep_seconds" value="10" />
+
+      <hr/>
+      <!-- Nuova sezione: skip in base a last seen con menu a tendina -->
+      <h3>Opzioni di ultimo accesso: NON inserire se:</h3>
+      <div class="dropdown">
+        <select id="skip_options" multiple>
+          <optgroup label="Ultimo accesso visibile">
+            <option value="last_seen_gt_1_day">Data ultimo accesso > 1 giorno</option>
+            <option value="last_seen_gt_7_days">Data ultimo accesso > 7 giorni</option>
+            <option value="last_seen_gt_30_days">Data ultimo accesso > 30 giorni</option>
+            <option value="last_seen_gt_60_days">Data ultimo accesso > 60 giorni</option>
+          </optgroup>
+          <optgroup label="Ultimo accesso non visibile">
+            <option value="user_status_empty">Molto tempo fa / nascosto</option>
+          </optgroup>
+        </select>
+      </div>
+
+      <small>Tenere premuto Ctrl (Windows) o Command (Mac) per selezionare più opzioni.</small>
+
+      <button onclick="startAdding()">Avvia Aggiunta</button>
+      <button onclick="stopAdding()">Ferma Aggiunta</button>
+    </div>
+
+    <div class="log-container">
+      <h3>Log Aggiunta</h3>
+      <div id="add-log"></div>
+    </div>
+  </section>
+
+  <!-- SEZIONE Riepilogo -->
+  <section id="summary">
+    <h2>Riepilogo</h2>
+    <p id="session-added-info"></p>
+    <table id="summary-table">
+      <thead>
+        <tr>
+          <th>Telefono</th>
+          <th>Aggiunti Oggi</th>
+          <th>Totale Aggiunti</th>
+          <th>In Pausa</th>
+          <th>Flood Time</th>
+        </tr>
+      </thead>
+      <tbody>
+        <!-- Le voci del riepilogo verranno caricate qui -->
+      </tbody>
+    </table>
+  </section>
+
+</div>
+
+<script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

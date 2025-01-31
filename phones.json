@@ -1,0 +1,68 @@
+[
+  {
+    "phone": "+393273846483",
+    "api_id": "20406532",
+    "api_hash": "3580fddeb51aa141c1acaed40a667f94",
+    "paused": true,
+    "added_today": 32,
+    "last_reset_date": "2025-01-31",
+    "total_added": 70,
+    "paused_until": null,
+    "non_result_errors": 2
+  },
+  {
+    "phone": "+67571977800",
+    "api_id": "28367197",
+    "api_hash": "8fa19487a1556285fd40ddeaaf29b612",
+    "paused": true,
+    "added_today": 10,
+    "last_reset_date": "2025-01-31",
+    "total_added": 27,
+    "paused_until": null,
+    "non_result_errors": 1
+  },
+  {
+    "phone": "+393761656610",
+    "api_id": "21767661",
+    "api_hash": "9b4650f48b7cee35b5234b115f69e784",
+    "paused": true,
+    "paused_until": null,
+    "added_today": 23,
+    "last_reset_date": "2025-01-31",
+    "total_added": 31,
+    "non_result_errors": 2
+  },
+  {
+    "phone": "+16193827731",
+    "api_id": "27185043",
+    "api_hash": "2a9fb15ea09ac799339cc624539fe2b8",
+    "paused": true,
+    "paused_until": null,
+    "added_today": 5,
+    "last_reset_date": "2025-01-31",
+    "total_added": 5,
+    "non_result_errors": 1
+  },
+  {
+    "phone": "+212626725135",
+    "api_id": "29357049",
+    "api_hash": "6dd274a0dc32eee02c0b16135ddc3c2b",
+    "paused": true,
+    "paused_until": null,
+    "added_today": 3,
+    "last_reset_date": "2025-01-31",
+    "total_added": 3,
+    "non_result_errors": 2
+  },
+  {
+    "phone": "+212645964669",
+    "api_id": "21253629",
+    "api_hash": "b0c2c7ff9c7e0b69295fe6743bd4af84",
+    "paused": false,
+    "paused_until": null,
+    "added_today": 3,
+    "last_reset_date": "2025-01-31",
+    "total_added": 3,
+    "non_result_errors": 2
+  }
+]
