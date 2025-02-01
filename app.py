@@ -46,16 +46,16 @@ LOCK = threading.Lock()
 
 # ------------------------ CUSTOM SESSION TELETHON ------------------------
 # Anche se i dati persistenti dei telefoni sono gestiti via JSON,
-# Telethon utilizza dei file SQLite per le sessioni. Per evitare errori di "database is locked"
-# definiamo una sessione personalizzata con timeout esteso.
+# Telethon crea internamente dei file di sessione in formato SQLite.
+# Per evitare errori di "database is locked" definiamo una sessione
+# personalizzata che crea la connessione con timeout maggiore.
 
 from telethon.sessions import SQLiteSession
 
 class CustomSQLiteSession(SQLiteSession):
-    def __init__(self, session_id, *args, **kwargs):
-        super().__init__(session_id, *args, **kwargs)
-        # Imposta un timeout maggiore (120 secondi)
-        self.set_timeout(120)
+    def _connect(self):
+        # Crea la connessione con timeout=120 secondi
+        self._conn = sqlite3.connect(self.session_name, timeout=120, check_same_thread=False)
 
 def create_telegram_client(phone_entry):
     session_file = os.path.join(SESSIONS_FOLDER, f"{phone_entry['phone']}.session")
@@ -437,9 +437,7 @@ def add_users_to_group_thread(group_username, users_list):
         'user_status_empty': ADD_SESSION.get('user_status_empty', False)
     }
 
-    # NOTA: Rimosso il codice di creazione di un nuovo event loop.
-    # Telethon in modalità sync gestisce internamente il proprio loop.
-
+    # NOTA: Non creiamo un nuovo event loop, Telethon in modalità sync gestisce internamente il proprio loop.
     phones = load_phones()
     phone_clients = {}
     group_entities = {}
