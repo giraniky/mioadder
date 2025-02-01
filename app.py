@@ -41,10 +41,7 @@ ADD_SESSION = {}
 
 LOCK = threading.Lock()
 
-
-# ---------------------------------------------------------------------
-# FUNZIONI DI SUPPORTO
-# ---------------------------------------------------------------------
+# ------------------------ FUNZIONI DI SUPPORTO ------------------------
 
 def load_phones():
     with LOCK:
@@ -72,7 +69,8 @@ def load_phones():
                         p['paused'] = False
                         p['paused_until'] = None
             return data
-        except:
+        except Exception as e:
+            print("Errore in load_phones:", e)
             return []
 
 def save_phones(phones):
@@ -93,7 +91,8 @@ def load_add_session():
         try:
             with open(LOG_STATUS_FILE, 'r', encoding='utf-8') as f:
                 return json.load(f)
-        except:
+        except Exception as e:
+            print("Errore in load_add_session:", e)
             return {}
 
 def save_add_session():
@@ -107,7 +106,19 @@ def create_telegram_client(phone_entry):
     api_hash = phone_entry['api_hash']
     return TelegramClient(session_file, api_id, api_hash)
 
-# Funzione wrapper per invocare una richiesta Telethon (usata per controllare la partecipazione, invitare, etc.)
+# Funzione per gestire le richieste (client(get_entity) non richiede istanziazione)
+def safe_telethon_call(func, *args, max_retries=5, **kwargs):
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e).lower():
+                time.sleep(2)
+            else:
+                raise
+    return func(*args, **kwargs)
+
+# Funzione per invocare una richiesta (client(request(...)))
 def safe_invoke_request(client, request_cls, *args, max_retries=5, **kwargs):
     for attempt in range(max_retries):
         try:
@@ -236,10 +247,7 @@ def safe_telethon_connect(client, max_retries=5):
                 raise
     return False
 
-
-# ---------------------------------------------------------------------
-# ROTTE FRONTEND
-# ---------------------------------------------------------------------
+# ------------------------ ROTTE FRONTEND ------------------------
 
 @app.route('/')
 def index():
@@ -426,7 +434,7 @@ def add_users_to_group_thread(group_username, users_list):
         save_add_session()
         print(msg)
 
-    # 1) Connetti tutti i phone
+    # 1) Connetti i phone
     for p in phones:
         reset_daily_counters_if_needed(p)
         session_path = os.path.join(SESSIONS_FOLDER, f"{p['phone']}.session")
@@ -444,7 +452,7 @@ def add_users_to_group_thread(group_username, users_list):
         save_add_session()
         return
 
-    # 2) Risolvi l'entity del gruppo (usa get_entity, non GetParticipantRequest)
+    # 2) Risolvi l'entity del gruppo usando get_entity (non GetParticipantRequest)
     for phone, client in list(phone_clients.items()):
         try:
             grp_ent = safe_telethon_call(client.get_entity, group_username)
@@ -469,7 +477,7 @@ def add_users_to_group_thread(group_username, users_list):
         save_add_session()
         return
 
-    # 3) Ogni client controlla se è già nel gruppo; se non c'è, si unisce
+    # 3) Controlla se ciascun phone è già nel gruppo; se non c'è, prova a unirsi
     for phone, client in phone_clients.items():
         try:
             me = client.get_me()
@@ -546,7 +554,7 @@ def add_users_to_group_thread(group_username, users_list):
         client = phone_clients[selected_phone]
         grp = group_entities[selected_phone]
 
-        # Risolvi l'entity dell'utente (usa get_entity, non GetParticipantRequest)
+        # Risolvi l'entity dell'utente con get_entity (non con GetParticipantRequest)
         try:
             user_entity = safe_telethon_call(client.get_entity, username)
         except errors.UsernameNotOccupiedError:
@@ -610,7 +618,7 @@ def add_users_to_group_thread(group_username, users_list):
             set_phone_pause(selected_phone, True, seconds=e.seconds)
             time.sleep(e.seconds)
         except errors.PeerFloodError:
-            log(f"[{selected_phone}] PeerFloodError: spam rilevato, pausa 120s.")
+            log(f"[{selected_phone}] PeerFloodError: pausa 120s.")
             set_phone_pause(selected_phone, True, seconds=120)
         except errors.UserPrivacyRestrictedError:
             log(f"[{selected_phone}] {username}: privacy restrittiva, skip.")
@@ -749,10 +757,11 @@ def upload_excel():
 def api_restart_tmux():
     """
     Chiude la sessione 'mioadder' e ne crea una nuova.
-    Modifica app_path in base al percorso reale di app.py.
+    Modifica app_path se necessario.
     """
     try:
-        app_path = "/root/mioadder/app.py"  # <-- Modifica questo path se necessario
+        # Specifica il percorso completo di app.py (modifica se necessario)
+        app_path = "/root/mioadder/app.py"
         cmd_kill = ["tmux", "kill-session", "-t", "mioadder"]
         subprocess.run(cmd_kill, check=False)
         cmd_new = ["tmux", "new-session", "-d", "-s", "mioadder", f"python {app_path}"]
