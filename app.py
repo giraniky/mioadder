@@ -752,21 +752,24 @@ def upload_excel():
         return jsonify({'error': f'Errore lettura Excel: {str(e)}'}), 400
     return jsonify({'user_list': '\n'.join(usernames)})
 
-# --- Riavvio TMUX ---
+def restart_tmux_thread(app_path):
+    # Attende qualche secondo in modo che l'endpoint REST possa rispondere
+    time.sleep(2)
+    # Chiude la sessione tmux esistente (se esiste)
+    subprocess.run(["tmux", "kill-session", "-t", "mioadder"], check=False)
+    # Avvia una nuova sessione tmux usando l'interprete corrente e il percorso completo di app.py
+    cmd_new = ["tmux", "new-session", "-d", "-s", "mioadder", sys.executable, app_path]
+    subprocess.run(cmd_new, check=True)
+
 @app.route('/api/restart_tmux', methods=['POST'])
 def api_restart_tmux():
-    """
-    Chiude la sessione 'mioadder' e ne crea una nuova.
-    Modifica app_path se necessario.
-    """
     try:
-        # Specifica il percorso completo di app.py (modifica se necessario)
+        # Specifica il percorso completo di app.py – MODIFICALO se necessario
         app_path = "/root/mioadder/app.py"
-        cmd_kill = ["tmux", "kill-session", "-t", "mioadder"]
-        subprocess.run(cmd_kill, check=False)
-        cmd_new = ["tmux", "new-session", "-d", "-s", "mioadder", f"python {app_path}"]
-        subprocess.run(cmd_new, check=True)
-        return jsonify({"success": True, "message": "Sessione TMUX 'mioadder' riavviata."})
+        # Avvia il thread di riavvio
+        threading.Thread(target=restart_tmux_thread, args=(app_path,), daemon=True).start()
+        # Restituisce immediatamente la risposta
+        return jsonify({"success": True, "message": "Riavvio della sessione TMUX 'mioadder' avviato."})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 
