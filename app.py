@@ -7,6 +7,7 @@ import datetime
 import asyncio
 import sqlite3
 import subprocess
+import logging
 
 from flask import Flask, render_template, request, jsonify
 from werkzeug.utils import secure_filename
@@ -23,10 +24,20 @@ from telethon.tl.functions.channels import (
 )
 from telethon.errors import rpcerrorlist
 
-import openpyxl  # Per la gestione di file Excel
+import openpyxl  # Per la gestione dei file Excel
+
+# ------------------------ CONFIGURAZIONE LOGGING ------------------------
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='[%(asctime)s] %(levelname)s %(threadName)s: %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler("app.log", mode="a", encoding="utf-8")
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # ------------------------ CONFIGURAZIONE APP ------------------------
-
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'uploads'
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -45,22 +56,26 @@ ADD_SESSION = {}
 LOCK = threading.Lock()
 
 # ------------------------ CUSTOM SESSION TELETHON ------------------------
-# Telethon crea internamente dei file di sessione in formato SQLite.
-# Per evitare errori di "database is locked" definiamo una sessione
-# personalizzata che crea la connessione con timeout maggiore.
+# Qui creiamo una sessione personalizzata che, al momento della connessione,
+# imposta la modalità WAL per ridurre il problema "database is locked".
 
 from telethon.sessions import SQLiteSession
 
 class CustomSQLiteSession(SQLiteSession):
     def _connect(self):
-        # Crea la connessione con timeout=120 secondi e consente l'accesso da thread differenti
+        # Crea la connessione con timeout=120 secondi e disabilita il controllo sullo stesso thread
         self._conn = sqlite3.connect(self.session_name, timeout=120, check_same_thread=False)
+        # Imposta la modalità WAL per una migliore concorrenza
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.commit()
+        logger.debug(f"SQLiteSession con {self.session_name} impostata in modalità WAL.")
 
 def create_telegram_client(phone_entry):
     session_file = os.path.join(SESSIONS_FOLDER, f"{phone_entry['phone']}.session")
     api_id = int(phone_entry['api_id'])
     api_hash = phone_entry['api_hash']
     custom_session = CustomSQLiteSession(session_file)
+    logger.debug(f"Creazione del client Telethon per il numero {phone_entry['phone']}")
     return TelegramClient(custom_session, api_id, api_hash)
 
 # ------------------------ FUNZIONI DI SUPPORTO ------------------------
@@ -73,18 +88,12 @@ def load_phones():
             with open(PHONES_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             for p in data:
-                if 'total_added' not in p:
-                    p['total_added'] = 0
-                if 'added_today' not in p:
-                    p['added_today'] = 0
-                if 'last_reset_date' not in p:
-                    p['last_reset_date'] = datetime.date.today().isoformat()
-                if 'paused_until' not in p:
-                    p['paused_until'] = None
-                if 'paused' not in p:
-                    p['paused'] = False
-                if 'non_result_errors' not in p:
-                    p['non_result_errors'] = 0
+                p.setdefault('total_added', 0)
+                p.setdefault('added_today', 0)
+                p.setdefault('last_reset_date', datetime.date.today().isoformat())
+                p.setdefault('paused_until', None)
+                p.setdefault('paused', False)
+                p.setdefault('non_result_errors', 0)
                 if p['paused_until']:
                     paused_dt = datetime.datetime.fromisoformat(p['paused_until'])
                     if datetime.datetime.now() >= paused_dt:
@@ -92,13 +101,14 @@ def load_phones():
                         p['paused_until'] = None
             return data
         except Exception as e:
-            print("Errore in load_phones:", e)
+            logger.error("Errore in load_phones: %s", e)
             return []
 
 def save_phones(phones):
     with LOCK:
         with open(PHONES_FILE, 'w', encoding='utf-8') as f:
             json.dump(phones, f, indent=2, ensure_ascii=False)
+        logger.debug("Salvati dati telefoni su file.")
 
 def reset_daily_counters_if_needed(phone_entry):
     today_str = datetime.date.today().isoformat()
@@ -114,34 +124,45 @@ def load_add_session():
             with open(LOG_STATUS_FILE, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except Exception as e:
-            print("Errore in load_add_session:", e)
+            logger.error("Errore in load_add_session: %s", e)
             return {}
 
 def save_add_session():
     with LOCK:
         with open(LOG_STATUS_FILE, 'w', encoding='utf-8') as f:
             json.dump(ADD_SESSION, f, indent=2, ensure_ascii=False)
+        logger.debug("Salvati dati sessione aggiunta.")
 
 def safe_telethon_call(func, *args, max_retries=10, **kwargs):
     for attempt in range(max_retries):
         try:
-            return func(*args, **kwargs)
+            result = func(*args, **kwargs)
+            logger.debug("safe_telethon_call riuscita al tentativo %d", attempt+1)
+            return result
         except sqlite3.OperationalError as e:
             if "database is locked" in str(e).lower():
+                logger.warning("Database locked in safe_telethon_call, tentativo %d: %s", attempt+1, e)
                 time.sleep(5)
             else:
+                logger.error("Errore in safe_telethon_call: %s", e)
                 raise
+    logger.error("safe_telethon_call: tutti i tentativi falliti, riprovo comunque")
     return func(*args, **kwargs)
 
 def safe_invoke_request(client, request_cls, *args, max_retries=10, **kwargs):
     for attempt in range(max_retries):
         try:
-            return client(request_cls(*args, **kwargs))
+            result = client(request_cls(*args, **kwargs))
+            logger.debug("safe_invoke_request riuscita al tentativo %d", attempt+1)
+            return result
         except sqlite3.OperationalError as e:
             if "database is locked" in str(e).lower():
+                logger.warning("Database locked in safe_invoke_request, tentativo %d: %s", attempt+1, e)
                 time.sleep(5)
             else:
+                logger.error("Errore in safe_invoke_request: %s", e)
                 raise
+    logger.error("safe_invoke_request: tutti i tentativi falliti, riprovo comunque")
     return client(request_cls(*args, **kwargs))
 
 def count_available_phones(phones):
@@ -173,19 +194,21 @@ def count_available_phones(phones):
         if flood_time > 0:
             continue
         available += 1
+    logger.debug("Numeri disponibili: %d", available)
     return available
 
 def suspend_until_enough_phones(min_phones, phones, username):
     global ADD_SESSION
-    if ADD_SESSION.get('running', False):
-        msg = f"Nessun phone disponibile per {username}, attendo almeno {min_phones} numeri liberi."
-        ADD_SESSION['log'].append(msg)
-        save_add_session()
+    msg = f"Nessun phone disponibile per {username}, attendo almeno {min_phones} numeri liberi."
+    logger.info(msg)
+    ADD_SESSION['log'].append(msg)
+    save_add_session()
     while True:
         if not ADD_SESSION.get('running', False):
             return
         if count_available_phones(phones) >= min_phones:
             msg2 = f"Numeri sufficienti disponibili per {username}, riprendo."
+            logger.info(msg2)
             ADD_SESSION['log'].append(msg2)
             save_add_session()
             return
@@ -203,6 +226,7 @@ def update_phone_stats(phone_number, added=0, total=0, non_result_err_inc=0):
             if non_result_err_inc:
                 p['non_result_errors'] += non_result_err_inc
             save_phones(phones)
+            logger.debug("Aggiornate statistiche per il numero %s", phone_number)
             return
 
 def set_phone_pause(phone_number, paused=True, seconds=0, days=0):
@@ -222,6 +246,7 @@ def set_phone_pause(phone_number, paused=True, seconds=0, days=0):
             else:
                 p['paused_until'] = None
             save_phones(phones)
+            logger.info("Impostato pause per il numero %s", phone_number)
             return
 
 def should_skip_user_by_last_seen(user_entity, skip_config):
@@ -253,12 +278,16 @@ def safe_telethon_connect(client, max_retries=5):
     for attempt in range(max_retries):
         try:
             client.connect()
+            logger.debug("Client connesso al tentativo %d", attempt+1)
             return True
         except sqlite3.OperationalError as e:
             if "database is locked" in str(e).lower():
+                logger.warning("Errore di connessione (database locked) al tentativo %d: %s", attempt+1, e)
                 time.sleep(2)
             else:
+                logger.error("Errore di connessione: %s", e)
                 raise
+    logger.error("Impossibile connettersi al client dopo %d tentativi", max_retries)
     return False
 
 # ------------------------ ROTTE FRONTEND ------------------------
@@ -299,6 +328,7 @@ def api_add_phone():
     }
     phones.append(new_phone_entry)
     save_phones(phones)
+    logger.info("Aggiunto nuovo telefono: %s", phone)
     return jsonify({'success': True})
 
 @app.route('/api/phones/<phone>', methods=['DELETE'])
@@ -306,6 +336,7 @@ def api_remove_phone(phone):
     phones = load_phones()
     phones = [p for p in phones if p['phone'] != phone]
     save_phones(phones)
+    logger.info("Rimosso telefono: %s", phone)
     return jsonify({'success': True})
 
 @app.route('/api/phones/<phone>/pause', methods=['POST'])
@@ -319,6 +350,7 @@ def api_pause_phone(phone):
             if not pause_state:
                 p['paused_until'] = None
             save_phones(phones)
+            logger.info("Impostato pause=%s per il telefono %s", pause_state, phone)
             return jsonify({'success': True})
     return jsonify({'error': 'Phone not found'}), 404
 
@@ -340,10 +372,13 @@ def api_send_code():
             'phone_code_hash': sent.phone_code_hash,
             '2fa_needed': False
         }
+        logger.info("Codice inviato al telefono %s", phone)
         return jsonify({'success': True})
     except errors.PhoneNumberBannedError:
+        logger.error("Telefono %s bannato da Telegram.", phone)
         return jsonify({'error': 'Numero bannato da Telegram.'}), 400
     except Exception as e:
+        logger.exception("Errore in send_code per %s", phone)
         return jsonify({'error': str(e)}), 400
     finally:
         client.disconnect()
@@ -366,18 +401,24 @@ def api_validate_code():
     try:
         client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
         del OTP_DICT[phone]
+        logger.info("OTP validato per il telefono %s", phone)
         return jsonify({'success': True})
     except errors.SessionPasswordNeededError:
         OTP_DICT[phone]['2fa_needed'] = True
         save_add_session()
+        logger.warning("2FA richiesto per il telefono %s", phone)
         return jsonify({'error': 'SESSION_PASSWORD_NEEDED'}), 400
     except errors.PhoneCodeInvalidError:
+        logger.warning("Codice OTP non valido per %s", phone)
         return jsonify({'error': 'Codice OTP non valido.'}), 400
     except errors.PhoneCodeExpiredError:
+        logger.warning("Codice OTP scaduto per %s", phone)
         return jsonify({'error': 'Codice OTP scaduto.'}), 400
     except errors.PhoneNumberUnoccupiedError:
+        logger.warning("Telefono %s non associato a un account.", phone)
         return jsonify({'error': 'Numero non associato a un account.'}), 400
     except Exception as e:
+        logger.exception("Errore in validate_code per %s", phone)
         return jsonify({'error': str(e)}), 400
     finally:
         client.disconnect()
@@ -401,22 +442,26 @@ def api_validate_password():
     try:
         client.sign_in(password=password)
         del OTP_DICT[phone]
+        logger.info("Password 2FA validata per %s", phone)
         return jsonify({'success': True})
     except errors.PasswordHashInvalidError:
+        logger.warning("Password 2FA non valida per %s", phone)
         return jsonify({'error': 'Password 2FA non valida.'}), 400
     except Exception as e:
+        logger.exception("Errore in validate_password per %s", phone)
         return jsonify({'error': str(e)}), 400
     finally:
         client.disconnect()
 
 # --- Aggiunta Utenti al Gruppo ---
 def add_users_to_group_thread(group_username, users_list):
-    # All'inizio del thread creiamo un event loop se non presente
+    # Assicuriamoci che il thread abbia un event loop
     try:
         asyncio.get_running_loop()
     except RuntimeError:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        logger.debug("Creato nuovo event loop nel thread.")
 
     global ADD_SESSION
     ADD_SESSION['running'] = True
@@ -450,7 +495,7 @@ def add_users_to_group_thread(group_username, users_list):
     def log(msg):
         ADD_SESSION['log'].append(msg)
         save_add_session()
-        print(msg)
+        logger.info(msg)
 
     # 1) Connetti i phone
     for p in phones:
@@ -691,6 +736,7 @@ def api_start_adding():
     save_add_session()
     t = threading.Thread(target=add_users_to_group_thread, args=(group_username, users_list))
     t.start()
+    logger.info("Avviata operazione di aggiunta per il gruppo %s", group_username)
     return jsonify({'success': True})
 
 @app.route('/api/log_status', methods=['GET'])
@@ -709,6 +755,7 @@ def api_stop_adding():
         ADD_SESSION['running'] = False
         ADD_SESSION['log'].append("Operazione fermata manualmente dall'utente.")
         save_add_session()
+        logger.info("Operazione fermata manualmente dall'utente.")
         return jsonify({"success": True, "message": "Operazione fermata."})
     else:
         return jsonify({"success": False, "message": "Nessuna operazione in corso."}), 400
@@ -767,7 +814,9 @@ def upload_excel():
         wb.close()
         os.remove(filepath)
     except Exception as e:
+        logger.exception("Errore lettura Excel")
         return jsonify({'error': f'Errore lettura Excel: {str(e)}'}), 400
+    logger.info("Excel caricato correttamente, %d usernames trovati.", len(usernames))
     return jsonify({'user_list': '\n'.join(usernames)})
 
 def restart_tmux_thread(app_path):
@@ -778,17 +827,18 @@ def restart_tmux_thread(app_path):
     # Avvia una nuova sessione tmux usando l'interprete corrente e il percorso completo di app.py
     cmd_new = ["tmux", "new-session", "-d", "-s", "mioadder", sys.executable, app_path]
     subprocess.run(cmd_new, check=True)
+    logger.info("Sessione tmux 'mioadder' riavviata.")
 
 @app.route('/api/restart_tmux', methods=['POST'])
 def api_restart_tmux():
     try:
         # Specifica il percorso completo di app.py – MODIFICALO se necessario
         app_path = "/root/mioadder/app.py"
-        # Avvia il thread di riavvio
         threading.Thread(target=restart_tmux_thread, args=(app_path,), daemon=True).start()
-        # Restituisce immediatamente la risposta
+        logger.info("Richiesta di riavvio tmux ricevuta.")
         return jsonify({"success": True, "message": "Riavvio della sessione TMUX 'mioadder' avviato."})
     except Exception as e:
+        logger.exception("Errore nel riavvio tmux")
         return jsonify({"success": False, "message": str(e)}), 500
 
 if __name__ == '__main__':
