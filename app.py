@@ -56,9 +56,8 @@ ADD_SESSION = {}
 LOCK = threading.Lock()
 
 # ------------------------ CUSTOM SESSION TELETHON ------------------------
-# Qui creiamo una sessione personalizzata che, al momento della connessione,
-# imposta la modalità WAL per ridurre il problema "database is locked".
-
+# Questa classe personalizzata imposta la connessione SQLite in modalità WAL
+# e con un timeout elevato per ridurre il problema "database is locked".
 from telethon.sessions import SQLiteSession
 
 class CustomSQLiteSession(SQLiteSession):
@@ -68,7 +67,7 @@ class CustomSQLiteSession(SQLiteSession):
         # Imposta la modalità WAL per una migliore concorrenza
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.commit()
-        logger.debug(f"SQLiteSession con {self.session_name} impostata in modalità WAL.")
+        logger.debug(f"SQLiteSession per {self.session_name} impostata in modalità WAL.")
 
 def create_telegram_client(phone_entry):
     session_file = os.path.join(SESSIONS_FOLDER, f"{phone_entry['phone']}.session")
@@ -250,6 +249,11 @@ def set_phone_pause(phone_number, paused=True, seconds=0, days=0):
             return
 
 def should_skip_user_by_last_seen(user_entity, skip_config):
+    # Se l'entità non è un utente (ad esempio, un Channel), la saltiamo.
+    from telethon.tl.types import User
+    if not isinstance(user_entity, User):
+        logger.info("Entity %s non è un utente. Skip invitation.", user_entity)
+        return True
     status = user_entity.status
     now = datetime.datetime.now()
     if not status:
