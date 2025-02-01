@@ -41,7 +41,6 @@ ADD_SESSION = {}
 
 LOCK = threading.Lock()
 
-
 # ------------------------ FUNZIONI DI SUPPORTO ------------------------
 
 def load_phones():
@@ -107,7 +106,7 @@ def create_telegram_client(phone_entry):
     api_hash = phone_entry['api_hash']
     return TelegramClient(session_file, api_id, api_hash)
 
-# Wrapper per funzioni come get_entity
+# Wrapper per funzioni come client.get_entity
 def safe_telethon_call(func, *args, max_retries=5, **kwargs):
     for attempt in range(max_retries):
         try:
@@ -119,7 +118,7 @@ def safe_telethon_call(func, *args, max_retries=5, **kwargs):
                 raise
     return func(*args, **kwargs)
 
-# Wrapper per invocare richieste TL (costruendo l'istanza)
+# Wrapper per invocare richieste TL (come GetParticipantRequest)
 def safe_invoke_request(client, request_cls, *args, max_retries=5, **kwargs):
     for attempt in range(max_retries):
         try:
@@ -453,7 +452,7 @@ def add_users_to_group_thread(group_username, users_list):
         save_add_session()
         return
 
-    # 2) Risolvi l'entity del gruppo con get_entity
+    # 2) Risolvi l'entity del gruppo (usa get_entity)
     for phone, client in list(phone_clients.items()):
         try:
             grp_ent = safe_telethon_call(client.get_entity, group_username)
@@ -478,7 +477,7 @@ def add_users_to_group_thread(group_username, users_list):
         save_add_session()
         return
 
-    # 3) Ogni client controlla se è già nel gruppo; se non c'è, prova a unirsi
+    # 3) Controlla se ciascun client è già nel gruppo; altrimenti prova a unirsi
     for phone, client in phone_clients.items():
         try:
             me = client.get_me()
@@ -752,21 +751,23 @@ def upload_excel():
 
 # --- Riavvio TMUX ---
 def restart_tmux_thread(app_path):
-    # Attende un paio di secondi per permettere all'endpoint REST di rispondere
+    # Attende qualche secondo per dare il tempo alla risposta REST di essere inviata
     time.sleep(2)
-    # Chiude la sessione tmux esistente (se esiste)
-    subprocess.run(["tmux", "kill-session", "-t", "mioadder"], check=False)
-    # Crea una nuova sessione tmux con nome diverso, ad esempio "mioadder_new"
+    # Crea una nuova sessione tmux con un nome diverso (ad es. "mioadder_new")
     cmd_new = ["tmux", "new-session", "-d", "-s", "mioadder_new", sys.executable, app_path]
     subprocess.run(cmd_new, check=True)
+    # Usa un comando detached (in background) per uccidere la sessione corrente ("mioadder")
+    # NOTA: questo comando viene eseguito da una shell separata, indipendente dall'attuale sessione.
+    cmd_kill = 'sleep 5; tmux kill-session -t mioadder'
+    subprocess.Popen(cmd_kill, shell=True)
 
 @app.route('/api/restart_tmux', methods=['POST'])
 def api_restart_tmux():
     try:
-        # Specifica il percorso completo di app.py – modifica se necessario
+        # Specifica il percorso completo di app.py – MODIFICALO se necessario
         app_path = "/root/mioadder/app.py"
         threading.Thread(target=restart_tmux_thread, args=(app_path,), daemon=True).start()
-        return jsonify({"success": True, "message": "Riavvio della sessione TMUX 'mioadder' avviato."})
+        return jsonify({"success": True, "message": "Riavvio della sessione TMUX avviato."})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 
