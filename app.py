@@ -11,6 +11,7 @@ import subprocess
 from flask import Flask, render_template, request, jsonify
 from werkzeug.utils import secure_filename
 
+# Import Telethon in modalità sync
 from telethon.sync import TelegramClient, errors
 from telethon import tl
 from telethon.tl.types import (
@@ -22,7 +23,9 @@ from telethon.tl.functions.channels import (
 )
 from telethon.errors import rpcerrorlist
 
-import openpyxl  # Per Excel
+import openpyxl  # Per la gestione di file Excel
+
+# ------------------------ CONFIGURAZIONE APP ------------------------
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'uploads'
@@ -40,6 +43,26 @@ OTP_DICT = {}
 ADD_SESSION = {}
 
 LOCK = threading.Lock()
+
+# ------------------------ CUSTOM SESSION TELETHON ------------------------
+# Anche se i dati persistenti dei telefoni sono gestiti via JSON,
+# Telethon utilizza dei file SQLite per le sessioni. Per evitare errori di "database is locked"
+# definiamo una sessione personalizzata con timeout esteso.
+
+from telethon.sessions import SQLiteSession
+
+class CustomSQLiteSession(SQLiteSession):
+    def __init__(self, session_id, *args, **kwargs):
+        super().__init__(session_id, *args, **kwargs)
+        # Imposta un timeout maggiore (120 secondi)
+        self.set_timeout(120)
+
+def create_telegram_client(phone_entry):
+    session_file = os.path.join(SESSIONS_FOLDER, f"{phone_entry['phone']}.session")
+    api_id = int(phone_entry['api_id'])
+    api_hash = phone_entry['api_hash']
+    custom_session = CustomSQLiteSession(session_file)
+    return TelegramClient(custom_session, api_id, api_hash)
 
 # ------------------------ FUNZIONI DI SUPPORTO ------------------------
 
@@ -100,32 +123,24 @@ def save_add_session():
         with open(LOG_STATUS_FILE, 'w', encoding='utf-8') as f:
             json.dump(ADD_SESSION, f, indent=2, ensure_ascii=False)
 
-def create_telegram_client(phone_entry):
-    session_file = os.path.join(SESSIONS_FOLDER, f"{phone_entry['phone']}.session")
-    api_id = int(phone_entry['api_id'])
-    api_hash = phone_entry['api_hash']
-    return TelegramClient(session_file, api_id, api_hash)
-
-# Funzione per gestire le richieste (client(get_entity) non richiede istanziazione)
-def safe_telethon_call(func, *args, max_retries=5, **kwargs):
+def safe_telethon_call(func, *args, max_retries=10, **kwargs):
     for attempt in range(max_retries):
         try:
             return func(*args, **kwargs)
         except sqlite3.OperationalError as e:
             if "database is locked" in str(e).lower():
-                time.sleep(2)
+                time.sleep(5)
             else:
                 raise
     return func(*args, **kwargs)
 
-# Funzione per invocare una richiesta (client(request(...)))
-def safe_invoke_request(client, request_cls, *args, max_retries=5, **kwargs):
+def safe_invoke_request(client, request_cls, *args, max_retries=10, **kwargs):
     for attempt in range(max_retries):
         try:
             return client(request_cls(*args, **kwargs))
         except sqlite3.OperationalError as e:
             if "database is locked" in str(e).lower():
-                time.sleep(2)
+                time.sleep(5)
             else:
                 raise
     return client(request_cls(*args, **kwargs))
@@ -422,8 +437,8 @@ def add_users_to_group_thread(group_username, users_list):
         'user_status_empty': ADD_SESSION.get('user_status_empty', False)
     }
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    # NOTA: Rimosso il codice di creazione di un nuovo event loop.
+    # Telethon in modalità sync gestisce internamente il proprio loop.
 
     phones = load_phones()
     phone_clients = {}
@@ -452,7 +467,7 @@ def add_users_to_group_thread(group_username, users_list):
         save_add_session()
         return
 
-    # 2) Risolvi l'entity del gruppo usando get_entity (non GetParticipantRequest)
+    # 2) Risolvi l'entity del gruppo usando get_entity
     for phone, client in list(phone_clients.items()):
         try:
             grp_ent = safe_telethon_call(client.get_entity, group_username)
@@ -554,7 +569,7 @@ def add_users_to_group_thread(group_username, users_list):
         client = phone_clients[selected_phone]
         grp = group_entities[selected_phone]
 
-        # Risolvi l'entity dell'utente con get_entity (non con GetParticipantRequest)
+        # Risolvi l'entity dell'utente con get_entity
         try:
             user_entity = safe_telethon_call(client.get_entity, username)
         except errors.UsernameNotOccupiedError:
@@ -772,7 +787,6 @@ def api_restart_tmux():
         return jsonify({"success": True, "message": "Riavvio della sessione TMUX 'mioadder' avviato."})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
-
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=5050, debug=True, threaded=False, use_reloader=False)
