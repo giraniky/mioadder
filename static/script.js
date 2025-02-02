@@ -241,8 +241,10 @@ async function startAdding() {
   let skipSelect = document.getElementById('skip_options');
   let selected = Array.from(skipSelect.selectedOptions).map(opt => opt.value);
 
-  let addLog = document.getElementById('add-log');
-  addLog.innerHTML += `<p>Inizio aggiunta al gruppo ${group_username}...</p>`;
+  if (!group_username || !user_list) {
+    alert('Dati insufficienti (gruppo o lista utenti vuota).');
+    return;
+  }
 
   try {
     let res = await fetch('/api/start_adding', {
@@ -260,13 +262,14 @@ async function startAdding() {
     });
     let data = await res.json();
     if (data.success) {
-      addLog.innerHTML += `<p>Thread di aggiunta avviato correttamente.</p>`;
-      pollAddLog();
+      alert('Operazione di aggiunta avviata! Vai su /log per i dettagli.');
+      // Se vuoi verificare automaticamente lo stato puoi attivare pollAddLog() qui,
+      // ma spostando il log su /log.html, non serve più.
     } else {
-      addLog.innerHTML += `<p>Errore: ${data.error}</p>`;
+      alert(`Errore: ${data.error}`);
     }
   } catch (err) {
-    addLog.innerHTML += `<p>Eccezione: ${err}</p>`;
+    alert('Eccezione: ' + err);
   }
 }
 
@@ -282,32 +285,6 @@ async function stopAdding() {
   } catch (err) {
     console.error('Errore stopAdding:', err);
   }
-}
-
-let pollInterval = null;
-
-function pollAddLog() {
-  if (pollInterval) clearInterval(pollInterval);
-  pollInterval = setInterval(async () => {
-    try {
-      let res = await fetch('/api/log_status');
-      let data = await res.json();
-      let addLog = document.getElementById('add-log');
-      addLog.innerHTML = '';
-      data.log.forEach(line => {
-        addLog.innerHTML += `<p>${line}</p>`;
-      });
-      if (!data.running) {
-        clearInterval(pollInterval);
-        pollInterval = null;
-        addLog.innerHTML += `<p>Operazione terminata. Totale aggiunti: ${data.total_added}</p>`;
-        loadPhones();
-        loadSummary();
-      }
-    } catch (err) {
-      console.error('Errore pollAddLog:', err);
-    }
-  }, 3000);
 }
 
 // -------------------------------------------------------
@@ -378,16 +355,7 @@ window.addEventListener('DOMContentLoaded', () => {
   loadPhones();
   loadSummary();
 
-  // Se c'è un'operazione in corso, continuiamo a fare polling
-  (async () => {
-    try {
-      let res = await fetch('/api/log_status');
-      let data = await res.json();
-      if (data.running) {
-        pollAddLog();
-      }
-    } catch (err) {
-      console.error('Errore /api/log_status:', err);
-    }
-  })();
+  // Se c'è un'operazione in corso, potresti fare un check
+  // per abilitare un polling interno, ma ora il log è su /log
+  // (nessun pollAddLog qui).
 });
