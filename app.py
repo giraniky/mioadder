@@ -22,7 +22,12 @@ from telethon.tl.types import (
 from telethon.tl.functions.channels import (
     InviteToChannelRequest, GetParticipantRequest, JoinChannelRequest
 )
-from telethon.errors import rpcerrorlist, FloodWaitError, PeerFloodError
+from telethon.errors import (
+    rpcerrorlist,
+    FloodWaitError,
+    PeerFloodError,
+    UsernameNotOccupiedError
+)
 
 import openpyxl  # Per la gestione dei file Excel
 
@@ -50,7 +55,7 @@ os.makedirs(SESSIONS_FOLDER, exist_ok=True)
 # Dizionario in memoria per OTP
 OTP_DICT = {}
 
-# Stato dell'operazione di aggiunta
+# Stato dell’operazione di aggiunta
 ADD_SESSION = {}
 
 LOCK = threading.Lock()
@@ -89,12 +94,14 @@ def load_phones():
                 p.setdefault('paused_until', None)
                 p.setdefault('paused', False)
                 p.setdefault('non_result_errors', 0)
-                # Sblocca i numeri se la pausa è scaduta
+                p.setdefault('pause_reason', '')  # nuovo campo per visualizzare il motivo di pausa
+                # Se la pausa è scaduta, sblocco il numero
                 if p['paused_until']:
                     paused_dt = datetime.datetime.fromisoformat(p['paused_until'])
                     if datetime.datetime.now() >= paused_dt:
                         p['paused'] = False
                         p['paused_until'] = None
+                        p['pause_reason'] = ''
             return data
         except Exception as e:
             logger.error("Errore in load_phones: %s", e)
@@ -167,12 +174,12 @@ def count_available_phones(phones):
     for p in phones:
         reset_daily_counters_if_needed(p)
         if p['paused']:
-            # Se è in pausa, controlla se è scaduta
             if p['paused_until']:
                 paused_dt = datetime.datetime.fromisoformat(p['paused_until'])
                 if now >= paused_dt:
                     p['paused'] = False
                     p['paused_until'] = None
+                    p['pause_reason'] = ''
                     save_phones(phones)
                 else:
                     continue
@@ -183,7 +190,6 @@ def count_available_phones(phones):
             continue
         if p['added_today'] >= 45:
             continue
-        # Se è in pausa flood
         flood_time = 0
         if p['paused_until']:
             paused_dt = datetime.datetime.fromisoformat(p['paused_until'])
@@ -226,12 +232,17 @@ def update_phone_stats(phone_number, added=0, total=0, non_result_err_inc=0):
                          phone_number, added, total, non_result_err_inc)
             return
 
-def set_phone_pause(phone_number, paused=True, seconds=0, days=0):
+def set_phone_pause(phone_number, paused=True, seconds=0, days=0, reason=''):
+    """
+    Mette in pausa o riattiva un numero specificando anche un motivo (pause_reason).
+    """
     phones = load_phones()
     for p in phones:
         if p['phone'] == phone_number:
             p['paused'] = paused
             if paused:
+                # Imposta un motivo (es: "FloodWait 3551s")
+                p['pause_reason'] = reason if reason else 'Manual'
                 if seconds:
                     dt = datetime.datetime.now() + datetime.timedelta(seconds=seconds)
                     p['paused_until'] = dt.isoformat()
@@ -242,8 +253,10 @@ def set_phone_pause(phone_number, paused=True, seconds=0, days=0):
                     p['paused_until'] = None
             else:
                 p['paused_until'] = None
+                p['pause_reason'] = ''
             save_phones(phones)
-            logger.info("Impostato pause=%s per il numero %s (secs=%d, days=%d)", paused, phone_number, seconds, days)
+            logger.info("Impostato pause=%s per il numero %s (secs=%d, days=%d, reason=%s)",
+                        paused, phone_number, seconds, days, p['pause_reason'])
             return
 
 def should_skip_user_by_last_seen(user_entity, skip_config):
@@ -327,6 +340,7 @@ def api_add_phone():
         'api_hash': api_hash,
         'paused': False,
         'paused_until': None,
+        'pause_reason': '',
         'added_today': 0,
         'last_reset_date': datetime.date.today().isoformat(),
         'total_added': 0,
@@ -355,6 +369,7 @@ def api_pause_phone(phone):
             p['paused'] = pause_state
             if not pause_state:
                 p['paused_until'] = None
+                p['pause_reason'] = ''
             save_phones(phones)
             logger.info("Impostato pause=%s per il telefono %s", pause_state, phone)
             return jsonify({'success': True})
@@ -461,6 +476,9 @@ def api_validate_password():
 
 # --- Aggiunta Utenti al Gruppo ---
 def add_users_to_group_thread(group_username, users_list):
+    """
+    Thread per aggiungere utenti al gruppo.
+    """
     try:
         asyncio.get_running_loop()
     except RuntimeError:
@@ -502,7 +520,7 @@ def add_users_to_group_thread(group_username, users_list):
         save_add_session()
         logger.info(msg)
 
-    # 1) Connetti i phone
+    # 1) Connetti i phone validi
     for p in phones:
         reset_daily_counters_if_needed(p)
         session_path = os.path.join(SESSIONS_FOLDER, f"{p['phone']}.session")
@@ -510,7 +528,7 @@ def add_users_to_group_thread(group_username, users_list):
             c = create_telegram_client(p)
             if not safe_telethon_connect(c):
                 log(f"[{p['phone']}] Errore di connessione (db locked). Pausa 120s.")
-                set_phone_pause(p['phone'], paused=True, seconds=120)
+                set_phone_pause(p['phone'], paused=True, seconds=120, reason='Connessione fallita (db locked)')
                 continue
             phone_clients[p['phone']] = c
 
@@ -529,10 +547,10 @@ def add_users_to_group_thread(group_username, users_list):
                 log(f"[{phone}] Gruppo '{group_username}' risolto correttamente.")
             else:
                 log(f"[{phone}] '{group_username}' non è un canale/supergruppo. Pausa.")
-                set_phone_pause(phone, paused=True)
+                set_phone_pause(phone, paused=True, reason='Group non valido')
         except Exception as e:
             log(f"[{phone}] Errore get_entity('{group_username}'): {e}. Pausa.")
-            set_phone_pause(phone, paused=True)
+            set_phone_pause(phone, paused=True, reason='get_entity error')
 
     for phone in list(phone_clients.keys()):
         if phone not in group_entities:
@@ -558,11 +576,12 @@ def add_users_to_group_thread(group_username, users_list):
                 log(f"[{phone}] Unito al gruppo con successo.")
             except Exception as e:
                 log(f"[{phone}] Errore join gruppo: {e}. Pausa.")
-                set_phone_pause(phone, paused=True)
+                set_phone_pause(phone, paused=True, reason='JoinChannelRequest error')
         except Exception as e:
             log(f"[{phone}] Errore controllo partecipazione: {e}. Pausa.")
-            set_phone_pause(phone, paused=True)
+            set_phone_pause(phone, paused=True, reason='Partecipazione check error')
 
+    # Aggiorna la lista phone_clients dopo eventuali pause
     for phone in list(phone_clients.keys()):
         current = load_phones()
         for px in current:
@@ -592,6 +611,7 @@ def add_users_to_group_thread(group_username, users_list):
             save_add_session()
             continue
 
+        # Se non abbiamo numeri pronti, attende
         attempts = 0
         selected_phone = None
         while attempts < len(phone_list):
@@ -614,7 +634,7 @@ def add_users_to_group_thread(group_username, users_list):
             break
 
         if not selected_phone:
-            # Nessun telefono libero -> sospendi
+            # Nessun telefono libero -> sospendi finché non ce n’è almeno uno
             suspend_until_enough_phones(min_phones_available, load_phones(), username)
             if not ADD_SESSION.get('running', False):
                 break
@@ -626,7 +646,7 @@ def add_users_to_group_thread(group_username, users_list):
         # Risolvi l'entity dell'utente
         try:
             user_entity = safe_telethon_call(client.get_entity, username)
-        except errors.UsernameNotOccupiedError:
+        except UsernameNotOccupiedError:
             log(f"[{selected_phone}] {username}: non esiste. Skip.")
             i += 1
             ADD_SESSION['last_user_index'] = i
@@ -682,22 +702,17 @@ def add_users_to_group_thread(group_username, users_list):
                 current = load_phones()
                 for xx in current:
                     if xx['phone'] == selected_phone and xx['non_result_errors'] >= max_non_result_errors:
-                        set_phone_pause(selected_phone, True, days=days_pause_non_result_errors)
+                        set_phone_pause(selected_phone, True, days=days_pause_non_result_errors,
+                                        reason='Troppi errori non_result')
                         xx['non_result_errors'] = 0
                         save_phones(current)
                         log(f"[{selected_phone}] Pausa {days_pause_non_result_errors} giorni per errori.")
-
-            # Rimuoviamo eventuale "sleep" che blocca tutto
-            # Se vuoi attendere un po' comunque, decommenta:
-            # time.sleep(sleep_seconds)
-
         except FloodWaitError as e:
             log(f"[{selected_phone}] FloodWaitError: pausa {e.seconds}s.")
-            set_phone_pause(selected_phone, True, seconds=e.seconds)
-            # Non blocchiamo tutto con time.sleep, passiamo al prossimo numero
+            set_phone_pause(selected_phone, True, seconds=e.seconds, reason=f'FloodWait {e.seconds}s')
         except PeerFloodError:
             log(f"[{selected_phone}] PeerFloodError: pausa 120s.")
-            set_phone_pause(selected_phone, True, seconds=120)
+            set_phone_pause(selected_phone, True, seconds=120, reason='PeerFloodError')
         except errors.UserPrivacyRestrictedError:
             log(f"[{selected_phone}] {username}: privacy restrittiva, skip.")
         except errors.UserNotMutualContactError:
@@ -797,7 +812,8 @@ def api_summary():
             'added_today': p['added_today'],
             'paused': p['paused'],
             'flood_time': flood_time,
-            'total_added': p['total_added']
+            'total_added': p['total_added'],
+            'pause_reason': p.get('pause_reason', '')
         })
     session_total = ADD_SESSION.get('total_added', 0)
     return jsonify({
