@@ -263,8 +263,6 @@ async function startAdding() {
     let data = await res.json();
     if (data.success) {
       alert('Operazione di aggiunta avviata! Vai su /log per i dettagli.');
-      // Se vuoi verificare automaticamente lo stato puoi attivare pollAddLog() qui,
-      // ma spostando il log su /log.html, non serve più.
     } else {
       alert(`Errore: ${data.error}`);
     }
@@ -303,6 +301,7 @@ async function loadSummary() {
     data.phones.forEach(p => {
       let pausedText = p.paused ? 'Yes' : 'No';
       let floodTimeFormatted = p.flood_time > 0 ? formatSeconds(p.flood_time) : '0';
+
       let row = document.createElement('tr');
       row.innerHTML = `
         <td>${p.phone}</td>
@@ -310,6 +309,7 @@ async function loadSummary() {
         <td>${p.total_added}</td>
         <td>${pausedText}</td>
         <td>${floodTimeFormatted}</td>
+        <td>${p.pause_reason}</td>
       `;
       tbody.appendChild(row);
     });
@@ -354,8 +354,4 @@ window.addEventListener('DOMContentLoaded', () => {
   showSection('manage-numbers');
   loadPhones();
   loadSummary();
-
-  // Se c'è un'operazione in corso, potresti fare un check
-  // per abilitare un polling interno, ma ora il log è su /log
-  // (nessun pollAddLog qui).
 });
