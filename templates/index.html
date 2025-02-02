@@ -61,7 +61,7 @@
         </tr>
       </thead>
       <tbody>
-        <!-- Le voci dei numeri verranno caricate qui -->
+        <!-- Caricamento dinamico da script.js -->
       </tbody>
     </table>
   </section>
@@ -77,7 +77,7 @@
 
     <div id="login-log" class="log-container">
       <h3>Log di Login</h3>
-      <!-- I messaggi di log appariranno qui -->
+      <!-- Messaggi di log in append -->
     </div>
 
     <div id="otp-section" style="display: none;">
@@ -107,7 +107,6 @@
       <label for="user_list">Lista Utenti (uno per riga):</label>
       <textarea id="user_list" rows="8" placeholder="@user1&#10;@user2&#10;@user3"></textarea>
 
-      <!-- Caricamento da file Excel -->
       <label for="excel_file">Oppure carica un file Excel (prima colonna = username):</label>
       <input type="file" id="excel_file" accept=".xlsx,.xlsm,.xltx,.xltm" />
       <button onclick="uploadExcelFile()">Carica Excel</button>
@@ -140,7 +139,7 @@
           </optgroup>
         </select>
       </div>
-      <small>Tenere premuto Ctrl (Windows) o Command (Mac) per selezionare più opzioni.</small>
+      <small>(Ctrl o Cmd per selezionare multipli)</small>
 
       <button onclick="startAdding()">Avvia Aggiunta</button>
       <button onclick="stopAdding()">Ferma Aggiunta</button>
@@ -164,11 +163,10 @@
         </tr>
       </thead>
       <tbody>
-        <!-- Le voci del riepilogo verranno caricate qui -->
+        <!-- Caricamento dinamico da script.js -->
       </tbody>
     </table>
   </section>
-
 </div>
 
 <script src="{{ url_for('static', filename='script.js') }}"></script>
