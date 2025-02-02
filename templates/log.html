@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <title>Log Operazione</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="container">
+    <h2>Log dell'Operazione di Aggiunta</h2>
+    <p>Qui sotto compare il log completo in tempo reale.</p>
+    <div id="add-log"></div>
+  </div>
+
+  <script>
+    let pollInterval = null;
+
+    function pollAddLog() {
+      if (pollInterval) clearInterval(pollInterval);
+      pollInterval = setInterval(async () => {
+        try {
+          let res = await fetch('/api/log_status');
+          let data = await res.json();
+          let addLog = document.getElementById('add-log');
+          addLog.innerHTML = '';
+          data.log.forEach(line => {
+            addLog.innerHTML += `<p>${line}</p>`;
+          });
+          if (!data.running) {
+            clearInterval(pollInterval);
+            pollInterval = null;
+            addLog.innerHTML += `<p><strong>Operazione terminata.</strong> Totale aggiunti: ${data.total_added}</p>`;
+          }
+        } catch (err) {
+          console.error('Errore pollAddLog:', err);
+        }
+      }, 3000);
+    }
+
+    // Avvio il polling all'apertura della pagina
+    pollAddLog();
+  </script>
+</body>
+</html>
