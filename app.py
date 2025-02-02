@@ -22,7 +22,7 @@ from telethon.tl.types import (
 from telethon.tl.functions.channels import (
     InviteToChannelRequest, GetParticipantRequest, JoinChannelRequest
 )
-from telethon.errors import rpcerrorlist
+from telethon.errors import rpcerrorlist, FloodWaitError, PeerFloodError
 
 import openpyxl  # Per la gestione dei file Excel
 
@@ -56,15 +56,11 @@ ADD_SESSION = {}
 LOCK = threading.Lock()
 
 # ------------------------ CUSTOM SESSION TELETHON ------------------------
-# Questa classe personalizzata imposta la connessione SQLite in modalità WAL
-# e con un timeout elevato per ridurre il problema "database is locked".
 from telethon.sessions import SQLiteSession
 
 class CustomSQLiteSession(SQLiteSession):
     def _connect(self):
-        # Crea la connessione con timeout=120 secondi e disabilita il controllo sullo stesso thread
         self._conn = sqlite3.connect(self.session_name, timeout=120, check_same_thread=False)
-        # Imposta la modalità WAL per una migliore concorrenza
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.commit()
         logger.debug(f"SQLiteSession per {self.session_name} impostata in modalità WAL.")
@@ -93,6 +89,7 @@ def load_phones():
                 p.setdefault('paused_until', None)
                 p.setdefault('paused', False)
                 p.setdefault('non_result_errors', 0)
+                # Sblocca i numeri se la pausa è scaduta
                 if p['paused_until']:
                     paused_dt = datetime.datetime.fromisoformat(p['paused_until'])
                     if datetime.datetime.now() >= paused_dt:
@@ -170,6 +167,7 @@ def count_available_phones(phones):
     for p in phones:
         reset_daily_counters_if_needed(p)
         if p['paused']:
+            # Se è in pausa, controlla se è scaduta
             if p['paused_until']:
                 paused_dt = datetime.datetime.fromisoformat(p['paused_until'])
                 if now >= paused_dt:
@@ -185,6 +183,7 @@ def count_available_phones(phones):
             continue
         if p['added_today'] >= 45:
             continue
+        # Se è in pausa flood
         flood_time = 0
         if p['paused_until']:
             paused_dt = datetime.datetime.fromisoformat(p['paused_until'])
@@ -218,14 +217,13 @@ def update_phone_stats(phone_number, added=0, total=0, non_result_err_inc=0):
     for p in phones:
         if p['phone'] == phone_number:
             reset_daily_counters_if_needed(p)
-            if added:
-                p['added_today'] += added
-            if total:
-                p['total_added'] += total
+            p['added_today'] += added
+            p['total_added'] += total
             if non_result_err_inc:
                 p['non_result_errors'] += non_result_err_inc
             save_phones(phones)
-            logger.debug("Aggiornate statistiche per il numero %s", phone_number)
+            logger.debug("Aggiornate statistiche per il numero %s: +%d, total +%d, err +%d",
+                         phone_number, added, total, non_result_err_inc)
             return
 
 def set_phone_pause(phone_number, paused=True, seconds=0, days=0):
@@ -245,14 +243,12 @@ def set_phone_pause(phone_number, paused=True, seconds=0, days=0):
             else:
                 p['paused_until'] = None
             save_phones(phones)
-            logger.info("Impostato pause per il numero %s", phone_number)
+            logger.info("Impostato pause=%s per il numero %s (secs=%d, days=%d)", paused, phone_number, seconds, days)
             return
 
 def should_skip_user_by_last_seen(user_entity, skip_config):
-    # Se l'entità non è un utente (ad esempio, un Channel), la saltiamo.
     from telethon.tl.types import User
     if not isinstance(user_entity, User):
-        logger.info("Entity %s non è un utente. Skip invitation.", user_entity)
         return True
     status = user_entity.status
     now = datetime.datetime.now()
@@ -294,11 +290,17 @@ def safe_telethon_connect(client, max_retries=5):
     logger.error("Impossibile connettersi al client dopo %d tentativi", max_retries)
     return False
 
-# ------------------------ ROTTE FRONTEND ------------------------
+# ------------------------ ROUTE PER TEMPLATE ------------------------
 
 @app.route('/')
 def index():
+    # Pagina principale con le sezioni
     return render_template('index.html')
+
+@app.route('/log')
+def log_page():
+    # Pagina separata per visualizzare i log
+    return render_template('log.html')
 
 # --- Gestione Numeri ---
 @app.route('/api/phones', methods=['GET'])
@@ -459,7 +461,6 @@ def api_validate_password():
 
 # --- Aggiunta Utenti al Gruppo ---
 def add_users_to_group_thread(group_username, users_list):
-    # Assicuriamoci che il thread abbia un event loop
     try:
         asyncio.get_running_loop()
     except RuntimeError:
@@ -519,7 +520,7 @@ def add_users_to_group_thread(group_username, users_list):
         save_add_session()
         return
 
-    # 2) Risolvi l'entity del gruppo usando get_entity
+    # 2) Risolvi l'entity del gruppo
     for phone, client in list(phone_clients.items()):
         try:
             grp_ent = safe_telethon_call(client.get_entity, group_username)
@@ -613,6 +614,7 @@ def add_users_to_group_thread(group_username, users_list):
             break
 
         if not selected_phone:
+            # Nessun telefono libero -> sospendi
             suspend_until_enough_phones(min_phones_available, load_phones(), username)
             if not ADD_SESSION.get('running', False):
                 break
@@ -621,7 +623,7 @@ def add_users_to_group_thread(group_username, users_list):
         client = phone_clients[selected_phone]
         grp = group_entities[selected_phone]
 
-        # Risolvi l'entity dell'utente con get_entity
+        # Risolvi l'entity dell'utente
         try:
             user_entity = safe_telethon_call(client.get_entity, username)
         except errors.UsernameNotOccupiedError:
@@ -637,6 +639,7 @@ def add_users_to_group_thread(group_username, users_list):
             save_add_session()
             continue
 
+        # Controllo "ultimo accesso"
         if should_skip_user_by_last_seen(user_entity, skip_config):
             log(f"[{selected_phone}] {username}: skip per last seen.")
             i += 1
@@ -644,6 +647,7 @@ def add_users_to_group_thread(group_username, users_list):
             save_add_session()
             continue
 
+        # Verifica se è già nel gruppo
         try:
             safe_invoke_request(client, GetParticipantRequest, grp, user_entity)
             log(f"[{selected_phone}] {username}: già nel gruppo. Skip.")
@@ -660,15 +664,18 @@ def add_users_to_group_thread(group_username, users_list):
             save_add_session()
             continue
 
+        # Prova a invitare l'utente
         try:
             safe_invoke_request(client, InviteToChannelRequest, grp, [user_entity])
-            update_phone_stats(selected_phone, added=1, total=1)
-            ADD_SESSION['total_added'] += 1
             log(f"[{selected_phone}] Invitato -> {username}")
 
+            # Controllo effettivo se è davvero nel gruppo
             try:
                 safe_invoke_request(client, GetParticipantRequest, grp, user_entity)
+                # A questo punto è confermato
                 log(f"[{selected_phone}] {username} confermato nel gruppo.")
+                update_phone_stats(selected_phone, added=1, total=1)
+                ADD_SESSION['total_added'] += 1
             except:
                 log(f"[{selected_phone}] ERRORE: {username} non confermato dopo invito.")
                 update_phone_stats(selected_phone, non_result_err_inc=1)
@@ -679,12 +686,16 @@ def add_users_to_group_thread(group_username, users_list):
                         xx['non_result_errors'] = 0
                         save_phones(current)
                         log(f"[{selected_phone}] Pausa {days_pause_non_result_errors} giorni per errori.")
-            time.sleep(sleep_seconds)
-        except errors.FloodWaitError as e:
+
+            # Rimuoviamo eventuale "sleep" che blocca tutto
+            # Se vuoi attendere un po' comunque, decommenta:
+            # time.sleep(sleep_seconds)
+
+        except FloodWaitError as e:
             log(f"[{selected_phone}] FloodWaitError: pausa {e.seconds}s.")
             set_phone_pause(selected_phone, True, seconds=e.seconds)
-            time.sleep(e.seconds)
-        except errors.PeerFloodError:
+            # Non blocchiamo tutto con time.sleep, passiamo al prossimo numero
+        except PeerFloodError:
             log(f"[{selected_phone}] PeerFloodError: pausa 120s.")
             set_phone_pause(selected_phone, True, seconds=120)
         except errors.UserPrivacyRestrictedError:
@@ -718,18 +729,22 @@ def api_start_adding():
     group_username = data.get('group_username', '').strip()
     user_list_raw = data.get('user_list', '').strip()
     users_list = [u.strip() for u in user_list_raw.splitlines() if u.strip()]
+
     ADD_SESSION['min_phones_available'] = data.get('min_phones_available', 1)
     ADD_SESSION['max_non_result_errors'] = data.get('max_non_result_errors', 3)
     ADD_SESSION['days_pause_non_result_errors'] = data.get('days_pause_non_result_errors', 2)
     ADD_SESSION['sleep_seconds'] = data.get('sleep_seconds', 10)
+
     skip_options = data.get('skip_options', [])
     ADD_SESSION['last_seen_gt_1_day'] = 'last_seen_gt_1_day' in skip_options
     ADD_SESSION['last_seen_gt_7_days'] = 'last_seen_gt_7_days' in skip_options
     ADD_SESSION['last_seen_gt_30_days'] = 'last_seen_gt_30_days' in skip_options
     ADD_SESSION['last_seen_gt_60_days'] = 'last_seen_gt_60_days' in skip_options
     ADD_SESSION['user_status_empty'] = 'user_status_empty' in skip_options
+
     if not group_username or not users_list:
         return jsonify({'error': 'Dati insufficienti (gruppo o lista utenti vuota).'}), 400
+
     ADD_SESSION['running'] = True
     ADD_SESSION['group'] = group_username
     ADD_SESSION['total_added'] = 0
@@ -738,6 +753,7 @@ def api_start_adding():
     if 'last_user_index' not in ADD_SESSION:
         ADD_SESSION['last_user_index'] = 0
     save_add_session()
+
     t = threading.Thread(target=add_users_to_group_thread, args=(group_username, users_list))
     t.start()
     logger.info("Avviata operazione di aggiunta per il gruppo %s", group_username)
@@ -823,12 +839,10 @@ def upload_excel():
     logger.info("Excel caricato correttamente, %d usernames trovati.", len(usernames))
     return jsonify({'user_list': '\n'.join(usernames)})
 
+# --- Riavvio TMUX ---
 def restart_tmux_thread(app_path):
-    # Attende qualche secondo in modo che l'endpoint REST possa rispondere
     time.sleep(2)
-    # Chiude la sessione tmux esistente (se esiste)
     subprocess.run(["tmux", "kill-session", "-t", "mioadder"], check=False)
-    # Avvia una nuova sessione tmux usando l'interprete corrente e il percorso completo di app.py
     cmd_new = ["tmux", "new-session", "-d", "-s", "mioadder", sys.executable, app_path]
     subprocess.run(cmd_new, check=True)
     logger.info("Sessione tmux 'mioadder' riavviata.")
@@ -836,8 +850,7 @@ def restart_tmux_thread(app_path):
 @app.route('/api/restart_tmux', methods=['POST'])
 def api_restart_tmux():
     try:
-        # Specifica il percorso completo di app.py – MODIFICALO se necessario
-        app_path = "/root/mioadder/app.py"
+        app_path = os.path.abspath(sys.argv[0])
         threading.Thread(target=restart_tmux_thread, args=(app_path,), daemon=True).start()
         logger.info("Richiesta di riavvio tmux ricevuta.")
         return jsonify({"success": True, "message": "Riavvio della sessione TMUX 'mioadder' avviato."})
